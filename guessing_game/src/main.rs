@@ -14,7 +14,7 @@ fn main() {
 
         io::stdin().read_line(&mut guess).expect("입력한 값을 읽지 못했습니다.");
 
-        let guess: u32 = match guess.trim().parse() {
+        let guess: i32 = match guess.trim().parse() {
             Ok(num) => num,
             Err(_) => continue,
         };
@@ -25,9 +25,9 @@ fn main() {
             Ordering::Less => println!("입력한 숫자가 작습니다!"),
             Ordering::Greater => println!("입력한 숫자가 큽니다!"),
             Ordering::Equal => {
-                println!("정답");
+                println!("정답!");
                 break;
-            },
+            }
         }
     }
 }

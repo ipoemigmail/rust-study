@@ -11,7 +11,10 @@ object Main {
     rt.unsafeRun(r)
 
     println("start")
+    val startTime = System.currentTimeMillis
     rt.unsafeRun(r)
+    val endTime = System.currentTimeMillis
+    println(s"spend time: ${endTime - startTime}")
   }
 }
 

@@ -1,7 +1,10 @@
+**/target
 */target
 /target
 **/*.rs.bk
+**/.idea
 */.idea
 .idea
 */.vscode
+**/.vscode
 .vscode

@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::sync::Arc;
+use std::env;
 
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -15,47 +16,39 @@ struct Hosts {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = env::args().collect();
     //let path = "/Users/ben.jeong/Develop/Works/story/story-deploy/projects/story-app-http/hosts/production.yml";
-    let path = "/tmp/common.yml";
+    //let path = "/tmp/common.yml";
+    if args.len() < 2 {
+      eprintln!("Usage: {} {{host-yaml-file-path}} cmds...", args[0]);
+      std::process::exit(-1);
+    }
+    let path = args[1].as_str();
+    let raw_cmds: Vec<_> = args.iter().skip(2).map(|s| s.as_str()).collect();
     let hosts = get_hosts(path)?;
     let cmds: Arc<Vec<_>> = Arc::new(
-        vec!["nodetool gossipinfo | grep generation"]
+       raw_cmds 
             .into_iter()
             .map(|x| x.to_owned())
             .collect(),
     );
-    let results = hosts
-        .into_iter()
-        .map(move |host| tokio::spawn(run_ssh_command(host, cmds.clone())))
+
+    let fibers = hosts
+        .iter()
+        .map(move |host| tokio::spawn(run_ssh_command(host.clone(), cmds.clone())))
         .collect::<Vec<_>>();
-    let r: Vec<_> = stream::iter(results)
+
+    let results: Vec<_> = stream::iter(fibers)
         .then(|f| async move { f.await.unwrap().unwrap_or_else(|x| x) })
         .collect()
         .await;
-    let mat: Vec<_> = r
-        .iter()
-        .map(|s| {
-            s.split("\n")
-                .map(|x| x.split(":").last().unwrap())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let tmat = transpose(mat);
-    let lines: Vec<String> = tmat.iter().map(|row| row.join("\t")).collect();
-    lines.iter().for_each(|line| println!("{}", line));
-    Ok(())
-}
 
-fn transpose(mat: Vec<Vec<&str>>) -> Vec<Vec<&str>> {
-    let mut result = Vec::new();
-    for (i, _) in mat.iter().enumerate() {
-        let mut row = Vec::new();
-        for (j, _) in mat[i].iter().enumerate() {
-            row.push(mat[j][i]);
-        }
-        result.push(row);
-    }
-    result
+    results.iter().for_each(|line| {
+      println!("============================== {} ==============================", line.0);
+      println!("{}", line.1)
+    });
+
+    Ok(())
 }
 
 fn get_hosts(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
@@ -68,7 +61,7 @@ fn get_hosts(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(result)
 }
 
-async fn run_ssh_command(host: String, args: Arc<Vec<String>>) -> Result<String, String> {
+async fn run_ssh_command(host: String, args: Arc<Vec<String>>) -> Result<(String, String), (String, String)> {
     let formatted_args = format!(
         "ssh deploy@{} -o StrictHostKeyChecking=no {}",
         host,
@@ -79,12 +72,12 @@ async fn run_ssh_command(host: String, args: Arc<Vec<String>>) -> Result<String,
         .args(v)
         .output()
         .await
-        .or_else(|e| Err(e.to_string()))?;
-    let out = output.stdout.iter().map(|c| *c as char).collect::<String>();
-    let err = output.stderr.iter().map(|c| *c as char).collect::<String>();
+        .or_else(|e| Err((host.as_str().to_string(), e.to_string())))?;
+    let out = output.stdout.into_iter().map(|c| c as char).collect::<String>();
+    let err = output.stderr.into_iter().map(|c| c as char).collect::<String>();
     if err.len() > 0 {
-        Err(err)
+        Err((host, err))
     } else {
-        Ok(out.trim().to_string())
+        Ok((host, out.trim().to_string()))
     }
 }

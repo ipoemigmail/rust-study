@@ -48,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "futures",
+ "tco",
  "tokio",
 ]
 
@@ -444,6 +445,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "tco"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1df2f71d309cf06f5452bfd62069e83f7accb64186e617c7edd7a006960b5181"
+dependencies = [
+ "quote",
+ "syn",
 ]
 
 [[package]]

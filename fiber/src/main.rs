@@ -1,9 +1,10 @@
-use chrono::Local;
-use futures::stream::{self, StreamExt};
 use std::error::Error;
 use std::future::Future;
 use std::slice::Iter;
 use std::time::Duration;
+
+use chrono::Local;
+use futures::stream::{self, StreamExt};
 use tokio::prelude::*;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;

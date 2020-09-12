@@ -1,5 +1,5 @@
 [package]
-name = "tco-exam"
+name = "my-telegram-bot"
 version = "0.1.0"
 authors = ["ben.jeong <ben.jeong@kakaocorp.com>"]
 edition = "2018"
@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 tco = "*"
-num-bigint = { version = "0.3", features = ["rand"] }
-
+telegram-bot = "0.7.0"
+futures = "0.3"
+tokio = { version = "0.2", features = ["full"] }

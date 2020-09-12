@@ -7,7 +7,7 @@ struct Info {
 }
 
 async fn index1() -> Result<String> {
-    Ok("Welcome!".to_owned())
+    Ok("Welcome!".to_string())
 }
 
 async fn index2(info: web::Json<Info>) -> Result<String> {
@@ -16,8 +16,12 @@ async fn index2(info: web::Json<Info>) -> Result<String> {
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().route("/", web::post().to(index2)).route("/", web::get().to(index1)))
-        .bind("127.0.0.1:8088")?
-        .run()
-        .await
+    HttpServer::new(|| {
+        App::new()
+            .route("/", web::post().to(index2))
+            .route("/", web::get().to(index1))
+    })
+    .bind("127.0.0.1:8088")?
+    .run()
+    .await
 }

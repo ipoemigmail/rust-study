@@ -14,3 +14,14 @@ actix-web = "3"
 actix-rt = "1"
 tokio = { version = "0.2", features = ["full"] }
 tco = "*"
+derive_more = "0.99"
+typed-builder = "0.8"
+log = "0.4"
+env_logger = "0.8"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "hello"
+harness = false

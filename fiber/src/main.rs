@@ -13,14 +13,10 @@ use tokio::time;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let start_time = Local::now();
-    let fibers: Vec<_> = (0..10000000)
+    let fibers: Vec<_> = (0..1000000)
         .into_iter()
         .map(|n| tokio::spawn(calc(n)))
         .collect();
-    //let fibers: Vec<_> = (0..10000000).into_iter().map(|n| tokio::spawn(async move {
-    //  time::delay_for(Duration::from_secs(1)).await;
-    //  n
-    //})).collect();
     let results: Vec<_> = stream::iter(fibers)
         .then(|f| async move { f.await })
         .collect()
@@ -35,6 +31,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn calc(n: i32) -> i32 {
-    tokio::time::delay_for(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     n
 }

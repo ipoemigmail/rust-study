@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
@@ -77,13 +79,26 @@ pub enum Error {
 }
 
 #[async_trait]
-pub trait UpbitService {
+pub trait UpbitService: Send + Sync + 'static {
     async fn market_list(&self) -> Result<Vec<Market>, Error>;
     async fn market_ticker_list(&self, market_ids: Vec<String>)
         -> Result<Vec<MarketTicker>, Error>;
 }
 
-pub struct UpbitServiceLive;
+pub struct UpbitServiceLive {
+    client: reqwest::Client,
+}
+
+impl UpbitServiceLive {
+    pub fn new() -> UpbitServiceLive {
+        UpbitServiceLive {
+            client: reqwest::ClientBuilder::new()
+                .connect_timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+        }
+    }
+}
 
 const BASE_URL: &str = "https://api.upbit.com/v1";
 
@@ -91,7 +106,10 @@ const BASE_URL: &str = "https://api.upbit.com/v1";
 impl UpbitService for UpbitServiceLive {
     async fn market_list(&self) -> Result<Vec<Market>, Error> {
         let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        let resp = reqwest::get(&url).await?;
+        let resp = self
+            .client
+            .execute(self.client.get(url).build().unwrap())
+            .await?;
         let result: Vec<Market> = serde_json::from_str(resp.text().await?.as_str())?;
         Ok(result)
     }
@@ -101,7 +119,10 @@ impl UpbitService for UpbitServiceLive {
         market_ids: Vec<String>,
     ) -> Result<Vec<MarketTicker>, Error> {
         let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        let resp = reqwest::get(&url).await?;
+        let resp = self
+            .client
+            .execute(self.client.get(url).build().unwrap())
+            .await?;
         let resp_text = resp.text().await?;
         //println!("{}", resp_text.as_str());
         let result: Vec<MarketTicker> = serde_json::from_str(resp_text.as_str())?;

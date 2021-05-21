@@ -1,18 +1,19 @@
 mod upbit;
 
 use anyhow::Result;
+use chrono::Local;
 use futures::stream;
 use futures::stream::StreamExt;
+use rust_decimal::{prelude::FromPrimitive, Decimal};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use rust_decimal::{Decimal, prelude::FromPrimitive};
-use tokio::time;
 use upbit::*;
 
 const BUFFER_SIZE: usize = 60 * 10;
+const DETECTED_RATE: f64 = 0.05;
 
 fn check(xs: &Vec<MarketTicker>) {
     //print!("{}, ", xs.first().unwrap().market);
@@ -22,10 +23,14 @@ fn check(xs: &Vec<MarketTicker>) {
         let last = xs.last().unwrap();
         let min = xs.first().unwrap();
         let diff = last.trade_price.clone() - min.trade_price.clone();
-        if last.trade_price.clone() * Decimal::from_f64(0.1).unwrap() < diff {
+        if last.trade_price.clone() * Decimal::from_f64(DETECTED_RATE.into()).unwrap() < diff {
+            let dt = Local::now();
             println!(
-                "{}, last: {}, min: {}",
-                last.market, last.trade_price, min.trade_price
+                "[{}] {}, last: {}, min: {}",
+                dt.to_string(),
+                last.market,
+                last.trade_price,
+                min.trade_price
             );
         }
     }
@@ -34,7 +39,7 @@ fn check(xs: &Vec<MarketTicker>) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let upbit_service = Arc::new(UpbitServiceLive::new());
-    let mut interval = time::interval(Duration::from_secs(1));
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut buffer: HashMap<String, Arc<Mutex<Vec<MarketTicker>>>> = HashMap::new();
     loop {
         interval.tick().await;

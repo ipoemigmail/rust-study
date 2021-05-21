@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use tokio::time;
 use upbit::*;
 
@@ -20,8 +21,8 @@ fn check(xs: &Vec<MarketTicker>) {
         ys.sort_by(|x, y| x.trade_price.partial_cmp(&y.trade_price).unwrap());
         let last = xs.last().unwrap();
         let min = xs.first().unwrap();
-        let diff = last.trade_price - min.trade_price;
-        if last.trade_price * 0.1 < diff {
+        let diff = last.trade_price.clone() - min.trade_price.clone();
+        if last.trade_price.clone() * Decimal::from_f64(0.1).unwrap() < diff {
             println!(
                 "{}, last: {}, min: {}",
                 last.market, last.trade_price, min.trade_price
@@ -57,7 +58,6 @@ async fn main() -> Result<()> {
                 b.pop();
             }
             b.insert(0, market_ticker);
-            //check(b)
         }
         let tasks: Vec<_> = buffer
             .iter()
@@ -70,6 +70,5 @@ async fn main() -> Result<()> {
             .then(|t| async move { t.await })
             .collect::<Vec<_>>()
             .await;
-        println!();
     }
 }

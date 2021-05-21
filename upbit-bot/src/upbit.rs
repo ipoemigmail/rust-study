@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Market {
@@ -29,41 +30,41 @@ pub struct MarketTicker {
     #[serde(rename = "trade_timestamp")]
     pub trade_timestamp: i64,
     #[serde(rename = "opening_price")]
-    pub opening_price: f64,
+    pub opening_price: Decimal,
     #[serde(rename = "high_price")]
-    pub high_price: f64,
+    pub high_price: Decimal,
     #[serde(rename = "low_price")]
-    pub low_price: f64,
+    pub low_price: Decimal,
     #[serde(rename = "trade_price")]
-    pub trade_price: f64,
+    pub trade_price: Decimal,
     #[serde(rename = "prev_closing_price")]
-    pub prev_closing_price: f64,
+    pub prev_closing_price: Decimal,
     #[serde(rename = "change")]
     pub change: String,
     #[serde(rename = "change_price")]
-    pub change_price: f64,
+    pub change_price: Decimal,
     #[serde(rename = "change_rate")]
     pub change_rate: f64,
     #[serde(rename = "signed_change_price")]
-    pub signed_change_price: f64,
+    pub signed_change_price: Decimal,
     #[serde(rename = "signed_change_rate")]
     pub signed_change_rate: f64,
     #[serde(rename = "trade_volume")]
-    pub trade_volume: f64,
+    pub trade_volume: Decimal,
     #[serde(rename = "acc_trade_price")]
-    pub acc_trade_price: f64,
+    pub acc_trade_price: Decimal,
     #[serde(rename = "acc_trade_price_24h")]
-    pub acc_trade_price24_h: f64,
+    pub acc_trade_price24_h: Decimal,
     #[serde(rename = "acc_trade_volume")]
-    pub acc_trade_volume: f64,
+    pub acc_trade_volume: Decimal,
     #[serde(rename = "acc_trade_volume_24h")]
-    pub acc_trade_volume24_h: f64,
+    pub acc_trade_volume24_h: Decimal,
     #[serde(rename = "highest_52_week_price")]
-    pub highest52_week_price: f64,
+    pub highest52_week_price: Decimal,
     #[serde(rename = "highest_52_week_date")]
     pub highest52_week_date: String,
     #[serde(rename = "lowest_52_week_price")]
-    pub lowest52_week_price: f64,
+    pub lowest52_week_price: Decimal,
     #[serde(rename = "lowest_52_week_date")]
     pub lowest52_week_date: String,
     #[serde(rename = "timestamp")]

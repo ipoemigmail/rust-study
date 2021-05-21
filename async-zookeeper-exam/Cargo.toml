@@ -1,0 +1,17 @@
+[package]
+name = "async-zookeeper-exam"
+version = "0.1.0"
+authors = ["ben.jung <ben.jung@kakaocommerce.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+zookeeper-async = "4.0.1"
+zookeeper = "0.6"
+log = "0.4"
+async-trait = "0.1"
+anyhow = "1"
+lazy_static = "*"

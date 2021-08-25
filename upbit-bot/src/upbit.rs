@@ -1,10 +1,11 @@
 use std::{fmt::Display, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use format_num::NumberFormat;
 use hmac::{Hmac, NewMac};
 use jwt::SignWithKey;
 use reqwest::header::{self, HeaderMap};
-use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha512};
 use std::collections::BTreeMap;
@@ -81,17 +82,30 @@ pub struct TradeTick {
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Account {
     #[serde(rename = "currency")]
-    currency: String,
+    pub currency: String,
     #[serde(rename = "balance")]
-    balance: Decimal,
+    pub balance: Decimal,
     #[serde(rename = "locked")]
-    locked: Decimal,
+    pub locked: Decimal,
     #[serde(rename = "avg_buy_price")]
-    avg_buy_price: Decimal,
+    pub avg_buy_price: Decimal,
     #[serde(rename = "avg_buy_price_modified")]
-    avg_buy_price_modified: bool,
+    pub avg_buy_price_modified: bool,
     #[serde(rename = "unit_currency")]
-    unit_currency: String,
+    pub unit_currency: String,
+}
+
+impl std::fmt::Display for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let num = NumberFormat::new();
+        let fmtstr = ",.5";
+        let balance = num.format(fmtstr, self.balance.to_f64().unwrap());
+        let avg_buy_price = num.format(fmtstr, self.avg_buy_price.to_f64().unwrap());
+        f.write_fmt(format_args!(
+            "{}: Balance - {}, Locked - {}, AverageBuyPrice - {}, UnitCurrency -  {}",
+            self.currency, balance, self.locked, avg_buy_price, self.unit_currency
+        ))
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]

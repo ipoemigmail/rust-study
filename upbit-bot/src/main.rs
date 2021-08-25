@@ -4,22 +4,21 @@ mod upbit;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use crossterm::event::{self, KeyModifiers};
+
 //use chrono::Local;
-use futures::channel::mpsc::{self, channel, Receiver};
+use futures::channel::mpsc::{channel, Receiver};
 use futures::SinkExt;
+use futures::lock::Mutex;
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
-use std::io;
-use std::time::Duration;
-use tui::{layout, style, text, widgets};
+
 //use static_init::dynamic;
 use futures::StreamExt;
 use std::num::NonZeroU32;
 use std::{collections::HashMap, sync::Arc};
-use tui::backend::{self, CrosstermBackend};
-use tui::Terminal;
+
+
 use upbit::*;
 
 struct UpbitRateLimiterService<U: UpbitService> {
@@ -181,18 +180,18 @@ async fn main() -> Result<()> {
     //    Arc::new(exchange_rate_limiters),
     //    Arc::new(quotation_rate_limiters),
     //));
-    let upbit_service = Arc::new(UpbitRateLimiterService::new(
+    let _upbit_service = Arc::new(UpbitRateLimiterService::new(
         Arc::new(UpbitServiceSimple::new()),
         Arc::new(order_rate_limiters),
         Arc::new(exchange_rate_limiters),
         Arc::new(quotation_rate_limiters),
     ));
-    let access_key = "nJYLpyEglbwNGd2DHIjJ1rBCuchEtnL2PXjIdKRO";
-    let secret_key = "E7Fg5LexgdfmXwLYtxk7P7r3L4FzsfkZkdNhTyw5";
-    let r = upbit_service
-        .orders_chance(access_key, secret_key, "KRW-BTC")
-        .await;
-    println!("{:?}", r);
+    let _access_key = "nJYLpyEglbwNGd2DHIjJ1rBCuchEtnL2PXjIdKRO";
+    let _secret_key = "E7Fg5LexgdfmXwLYtxk7P7r3L4FzsfkZkdNhTyw5";
+    //let r = upbit_service
+    //    .orders_chance(access_key, secret_key, "KRW-BTC")
+    //    .await;
+    //println!("{}", serde_json::to_string(&r.unwrap()).unwrap());
     //let mut s = create_ticker_stream(upbit_service.clone()).await;
     //while let Some(list) = s.next().await {
     //    for t in list.iter() {
@@ -243,88 +242,6 @@ async fn main() -> Result<()> {
     //        .collect::<Vec<_>>()
     //        .await;
     //}
-
-    /*
-    let mut stdout = io::stdout();
-    let (tx, mut rx) = mpsc::channel(0);
-    let tick_rate = Duration::from_millis(250);
-
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        event::EnableMouseCapture
-    )?;
-
-    ui::start_ticker(tick_rate, tx);
-
-    let backend = backend::CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-    let mut scroll = 0_i32;
-    let mut v_size = 0_i32;
-
-    fn rollback_console(t: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-        crossterm::terminal::disable_raw_mode()?;
-        crossterm::execute!(
-            t.backend_mut(),
-            crossterm::terminal::LeaveAlternateScreen,
-            event::DisableMouseCapture
-        )?;
-        t.show_cursor()?;
-        Ok(())
-    }
-
-    loop {
-        let now = chrono::Local::now().to_rfc3339();
-        let lines = (0..50)
-            .map(|n| format!("[{}] {}", now, n))
-            .collect::<Vec<_>>();
-        let len_lines = lines.len() as i32;
-        let debug_text = "";
-        terminal.draw(|f| {
-            v_size = f.size().height as i32;
-            let block = widgets::Block::default()
-                .title(format!("< UpBit Console > -- [{}]", debug_text))
-                .borders(widgets::Borders::ALL);
-            let border_size = 2;
-            v_size -= border_size;
-            let paragraph = widgets::Paragraph::new(lines.join("\n"))
-                .block(block)
-                .alignment(layout::Alignment::Left)
-                .wrap(widgets::Wrap { trim: true })
-                .scroll((scroll as u16, 0));
-            f.render_widget(paragraph, f.size());
-        })?;
-        match rx.next().await {
-            Some(crate::ui::Event::Tick) => (),
-            Some(crate::ui::Event::UiEvent(e)) => match e {
-                event::Event::Key(key_event) => match key_event.code {
-                    event::KeyCode::Char('q') => {
-                        rollback_console(&mut terminal)?;
-                        break;
-                    }
-                    event::KeyCode::Char('c')
-                        if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
-                    {
-                        rollback_console(&mut terminal)?;
-                        break;
-                    }
-                    event::KeyCode::Char('k') => {
-                        scroll -= 1;
-                        scroll = scroll.max(0);
-                    }
-                    event::KeyCode::Char('j') => {
-                        scroll += 1;
-                        scroll = scroll.min(len_lines - v_size).max(0);
-                    }
-                    _ => (),
-                },
-                _ => (),
-            },
-            None => break,
-        }
-    }
-    */
+    ui::run(async_lock::RwLock::new(vec![])).await?;
     Ok(())
 }

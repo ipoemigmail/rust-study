@@ -79,7 +79,7 @@ pub struct TradeTick {
     pub timestamp: i64,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Account {
     #[serde(rename = "currency")]
     pub currency: String,

@@ -317,7 +317,7 @@ impl UpbitService for UpbitServiceSimple {
         let url = format!("{}/accounts", BASE_URL);
         let key: Hmac<Sha512> = Hmac::new_from_slice(secret_key.as_bytes()).unwrap();
         let mut claims = BTreeMap::new();
-        claims.insert("access_key", access_key.to_owned());
+        claims.insert("access_key", access_key.to_string());
         claims.insert("nonce", Uuid::new_v4().to_string());
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
@@ -336,10 +336,10 @@ impl UpbitService for UpbitServiceSimple {
         let query_hash = Sha512::digest(query_string.as_bytes());
         let key: Hmac<Sha512> = Hmac::new_from_slice(secret_key.as_bytes()).unwrap();
         let mut claims = BTreeMap::new();
-        claims.insert("access_key", access_key.to_owned());
+        claims.insert("access_key", access_key.to_string());
         claims.insert("nonce", Uuid::new_v4().to_string());
         claims.insert("query_hash", format!("{:x}", query_hash));
-        claims.insert("query_hash_alg", "SHA512".to_owned());
+        claims.insert("query_hash_alg", "SHA512".to_string());
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
         header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
@@ -384,7 +384,7 @@ impl UpbitService for UpbitServiceDummyAccount {
     ) -> Result<OrderChance, Error> {
         let result = OrderChance {
             market: OrderMarket {
-                id: market_id.to_owned(),
+                id: market_id.to_string(),
                 ..OrderMarket::default()
             },
             ..OrderChance::default()

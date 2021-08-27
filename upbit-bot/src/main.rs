@@ -3,6 +3,8 @@ mod domain;
 mod ui;
 mod upbit;
 
+use dotenv::dotenv;
+
 use anyhow::Result;
 use async_lock::RwLock;
 use async_trait::async_trait;
@@ -20,15 +22,12 @@ use futures::StreamExt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
-
 use std::collections::HashSet;
 
 use std::iter::FromIterator;
 use std::num::NonZeroU32;
 
-
-
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::spawn;
 use ui::ToLines;
@@ -36,7 +35,6 @@ use ui::ToLines;
 use upbit::*;
 
 use crate::domain::{get_all_tickers, AppState};
-
 
 struct UpbitRateLimiterService<U: UpbitService> {
     order_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
@@ -151,7 +149,7 @@ impl ToLines for AppState {
                         "{} - Current Amount: {}, Quantity: {}, Buy Price: {}, Buy Amount: {}",
                         a.currency, cur_amount, balance, avg_buy_price, buy_amount
                     ),
-                    None => "".to_owned(),
+                    None => "".to_string(),
                 }
             })
             .collect::<Vec<_>>();
@@ -168,9 +166,11 @@ impl ToLines for Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let order_rate_limiters = create_limiter(8, 200);
-    let exchange_rate_limiters = create_limiter(30, 900);
-    let quotation_rate_limiters = create_limiter(10, 600);
+    dotenv().ok();
+
+    let order_rate_limiters = create_limiter((8.0 * 0.9) as u32, 200);
+    let exchange_rate_limiters = create_limiter((30.0 * 0.9) as u32, 900);
+    let quotation_rate_limiters = create_limiter((10.0 * 0.9) as u32, 600);
     //let upbit_service = Arc::new(UpbitRateLimiterService::new(
     //    Arc::new(UpbitServiceDummyAccount::new()),
     //    Arc::new(order_rate_limiters),
@@ -183,11 +183,13 @@ async fn main() -> Result<()> {
         Arc::new(exchange_rate_limiters),
         Arc::new(quotation_rate_limiters),
     ));
-    let access_key = "nJYLpyEglbwNGd2DHIjJ1rBCuchEtnL2PXjIdKRO";
-    let secret_key = "E7Fg5LexgdfmXwLYtxk7P7r3L4FzsfkZkdNhTyw5";
+    
+    let access_key = std::env::var("ACCESS_KEY").map_err(|_| anyhow::format_err!("ACCESS_KEY was not found in environment var"))?;
+    let secret_key = std::env::var("SECRET_KEY").map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
+
     let app_state = Arc::new(RwLock::new(AppState {
         accounts: Arc::new(HashSet::from_iter(vec![Account {
-            currency: "KRW-BTC".to_owned(),
+            currency: "KRW-BTC".to_string(),
             balance: Decimal::from(1),
             ..Account::default()
         }])),
@@ -210,8 +212,8 @@ async fn main() -> Result<()> {
                 match tickers {
                     Ok(xs) => app_state1.write().await.last_tick = Arc::new(xs),
                     Err(e) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         println!("{}", e);
-                        break;
                     }
                 }
             }
@@ -224,14 +226,14 @@ async fn main() -> Result<()> {
         let upbit_service1 = upbit_service.clone();
         spawn(async move {
             loop {
-                let accounts = upbit_service1.accounts(access_key, secret_key).await;
+                let accounts = upbit_service1.accounts(access_key.as_str(), secret_key.as_str()).await;
                 match accounts {
                     Ok(xs) => {
                         app_state1.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
                     }
                     Err(e) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         println!("{}", e);
-                        break;
                     }
                 }
             }
@@ -242,7 +244,6 @@ async fn main() -> Result<()> {
     {}
 
     loop {
-        //ui_state = ui::draw(&mut terminal, ui_state, &app_state, "")
         match rx.next().await {
             Some(crate::ui::Event::Tick) => {
                 ui_state = ui::draw(&mut terminal, ui_state, &(*app_state.read().await), "")

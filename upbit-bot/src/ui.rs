@@ -1,15 +1,6 @@
-use std::{
-    borrow::BorrowMut,
-    cell::{RefCell, RefMut},
-    io::{self, Stdout},
-    ops::{Deref, DerefMut},
-    rc::Rc,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::{self, Stdout}, time::Duration};
 
 use anyhow::Result;
-
 
 use futures::{
     channel::mpsc::{self, Receiver},

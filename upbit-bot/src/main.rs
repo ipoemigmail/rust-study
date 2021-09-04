@@ -3,193 +3,62 @@ mod domain;
 mod ui;
 mod upbit;
 
-use dotenv::dotenv;
-
+use crate::domain::*;
 use anyhow::Result;
 use async_lock::RwLock;
-use async_trait::async_trait;
-use format_num::format_num;
-
+use chrono::prelude::*;
+use chrono::DurationRound;
 use crossterm::event::{self, KeyModifiers};
-//use chrono::Local;
-
-use governor::clock::DefaultClock;
-use governor::state::{InMemoryState, NotKeyed};
-use governor::{Quota, RateLimiter};
-
-//use static_init::dynamic;
+use dotenv::dotenv;
 use futures::StreamExt;
-use rust_decimal::prelude::ToPrimitive;
+use itertools::Itertools;
 use rust_decimal::Decimal;
-
+use static_init::dynamic;
+use std::collections::HashMap;
 use std::collections::HashSet;
-
 use std::iter::FromIterator;
-use std::num::NonZeroU32;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::spawn;
+use tokio::task::JoinHandle;
 use ui::ToLines;
-
 use upbit::*;
 
-use crate::domain::{get_all_tickers, AppState};
+#[dynamic]
+static DEBUG_MESSAGES: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(vec![]));
+#[dynamic]
+static REQ_REMAINS: Arc<RwLock<HashMap<String, (u32, u32)>>> =
+    Arc::new(RwLock::new(HashMap::new()));
 
-struct UpbitRateLimiterService<U: UpbitService> {
-    order_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    exchange_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    quotation_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    upbit_service: Arc<U>,
-}
-
-impl<U: UpbitService> UpbitRateLimiterService<U> {
-    fn new(
-        upbit_service: Arc<U>,
-        order_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-        exchange_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-        quotation_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    ) -> UpbitRateLimiterService<U> {
-        UpbitRateLimiterService {
-            order_rate_limiters,
-            exchange_rate_limiters,
-            quotation_rate_limiters,
-            upbit_service,
-        }
+pub async fn append_debug_message(message: &str) {
+    let mut messages = DEBUG_MESSAGES.write().await;
+    let now = chrono::Local::now();
+    messages.insert(0, format!("[{}] {}", now.to_rfc3339(), message));
+    if messages.len() > 5 {
+        let len = messages.len();
+        messages.remove(len - 1);
     }
 }
 
-#[async_trait]
-impl<U: UpbitService> UpbitService for UpbitRateLimiterService<U> {
-    async fn market_list(&self) -> Result<Vec<Market>, Error> {
-        for rate_limiter in self.quotation_rate_limiters.iter() {
-            rate_limiter.until_ready().await;
-        }
-        self.upbit_service.market_list().await
-    }
-
-    async fn market_ticker_list(&self, market_ids: Vec<String>) -> Result<Vec<TradeTick>, Error> {
-        for rate_limiter in self.quotation_rate_limiters.iter() {
-            rate_limiter.until_ready().await;
-        }
-        self.upbit_service.market_ticker_list(market_ids).await
-    }
-
-    async fn candles_minutes(
-        &self,
-        unit: MinuteUnit,
-        market_id: &str,
-        count: u8,
-    ) -> Result<Vec<Candle>, Error> {
-        for rate_limiter in self.quotation_rate_limiters.iter() {
-            rate_limiter.until_ready().await;
-        }
-        self.upbit_service
-            .candles_minutes(unit, market_id, count)
-            .await
-    }
-
-    async fn accounts(&self, access_key: &str, secret_key: &str) -> Result<Vec<Account>, Error> {
-        for rate_limiter in self.exchange_rate_limiters.iter() {
-            rate_limiter.until_ready().await;
-        }
-        self.upbit_service.accounts(access_key, secret_key).await
-    }
-
-    async fn orders_chance(
-        &self,
-        access_key: &str,
-        secret_key: &str,
-        market_id: &str,
-    ) -> Result<OrderChance, Error> {
-        for rate_limiter in self.exchange_rate_limiters.iter() {
-            rate_limiter.until_ready().await;
-        }
-        self.upbit_service
-            .orders_chance(access_key, secret_key, market_id)
-            .await
-    }
-}
-
-#[allow(dead_code)]
-fn create_limiter(
-    per_second: u32,
-    per_minute: u32,
-) -> Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {
-    vec![
-        RateLimiter::direct(Quota::per_second(NonZeroU32::new(per_second).unwrap())),
-        RateLimiter::direct(Quota::per_minute(NonZeroU32::new(per_minute).unwrap())),
-    ]
-}
-
-impl ToLines for AppState {
-    fn lines(&self) -> Vec<String> {
-        let mut result = self
-            .accounts
-            .iter()
-            .map(|a| {
-                let v = self
-                    .last_tick
-                    .iter()
-                    .find(|t| t.market == format!("{}-{}", a.unit_currency, a.currency));
-                let price = if a.currency == "KRW" {
-                    1.into()
-                } else {
-                    v.map(|x| x.trade_price).unwrap_or(Decimal::ZERO)
-                };
-                let values = (|| -> Option<_> {
-                    let cur_amount = format_num!(",.2", (a.balance * price).to_f64()?);
-                    let buy_amount = format_num!(",.2", (a.balance * a.avg_buy_price).to_f64()?);
-                    let balance = format_num!(",.4", a.balance.to_f64()?);
-                    let avg_buy_price = format_num!(",.2", a.avg_buy_price.to_f64()?);
-                    Some((cur_amount, buy_amount, balance, avg_buy_price))
-                })();
-                match values {
-                    Some((cur_amount, buy_amount, balance, avg_buy_price)) => format!(
-                        "{} - Current Amount: {}, Quantity: {}, Buy Price: {}, Buy Amount: {}",
-                        a.currency, cur_amount, balance, avg_buy_price, buy_amount
-                    ),
-                    None => "".to_string(),
-                }
-            })
-            .collect::<Vec<_>>();
-        result.sort();
-        result
-    }
-}
-
-impl ToLines for Vec<String> {
-    fn lines(&self) -> Vec<String> {
-        self.clone()
-    }
+pub async fn insert_req_remain(group: &str, min_remain: u32, sec_remain: u32) {
+    let mut req_remain = REQ_REMAINS.write().await;
+    req_remain.insert(group.to_owned(), (min_remain, sec_remain));
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
+    let upbit_service = Arc::new(UpbitServiceSimple::new());
+    let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
 
-    let order_rate_limiters = create_limiter((8.0 * 0.9) as u32, 200);
-    let exchange_rate_limiters = create_limiter((30.0 * 0.9) as u32, 900);
-    let quotation_rate_limiters = create_limiter((10.0 * 0.9) as u32, 600);
-    //let upbit_service = Arc::new(UpbitRateLimiterService::new(
-    //    Arc::new(UpbitServiceDummyAccount::new()),
-    //    Arc::new(order_rate_limiters),
-    //    Arc::new(exchange_rate_limiters),
-    //    Arc::new(quotation_rate_limiters),
-    //));
-    let upbit_service = Arc::new(UpbitRateLimiterService::new(
-        Arc::new(UpbitServiceSimple::new()),
-        Arc::new(order_rate_limiters),
-        Arc::new(exchange_rate_limiters),
-        Arc::new(quotation_rate_limiters),
-    ));
-    
-    let access_key = std::env::var("ACCESS_KEY").map_err(|_| anyhow::format_err!("ACCESS_KEY was not found in environment var"))?;
-    let secret_key = std::env::var("SECRET_KEY").map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
+    let access_key = std::env::var("ACCESS_KEY")
+        .map_err(|_| anyhow::format_err!("ACCESS_KEY was not found in environment var"))?;
+    let secret_key = std::env::var("SECRET_KEY")
+        .map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
 
     let app_state = Arc::new(RwLock::new(AppState {
         accounts: Arc::new(HashSet::from_iter(vec![Account {
-            currency: "KRW-BTC".to_string(),
+            currency: "KRW-BTC".to_owned(),
             balance: Decimal::from(1),
             ..Account::default()
         }])),
@@ -198,62 +67,54 @@ async fn main() -> Result<()> {
     let mut terminal = ui::create_terminal()?;
     ui::start_ui(&mut terminal)?;
 
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(25);
     let mut rx = ui::start_ui_ticker(tick_rate);
     let mut ui_state = ui::UiState::new();
 
-    // last tick updater
-    {
-        let app_state1 = app_state.clone();
-        let upbit_service1 = upbit_service.clone();
-        spawn(async move {
-            loop {
-                let tickers = get_all_tickers(upbit_service1.clone()).await;
-                match tickers {
-                    Ok(xs) => app_state1.write().await.last_tick = Arc::new(xs),
-                    Err(e) => {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        println!("{}", e);
-                    }
-                }
-            }
-        });
-    }
+    // candle updater
 
-    // accounts updater
-    {
-        let app_state1 = app_state.clone();
-        let upbit_service1 = upbit_service.clone();
-        spawn(async move {
-            loop {
-                let accounts = upbit_service1.accounts(access_key.as_str(), secret_key.as_str()).await;
-                match accounts {
-                    Ok(xs) => {
-                        app_state1.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
-                    }
-                    Err(e) => {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        println!("{}", e);
-                    }
-                }
-            }
-        });
-    }
+    let _candle_updater = candle_updater(app_state.clone(), upbit_service.clone()).await;
 
-    // buyer
-    {}
+    let _market_list_updater = market_list_updater(app_state.clone(), upbit_service.clone()).await;
 
+    let _account_updater = account_updater(
+        app_state.clone(),
+        upbit_service.clone(),
+        access_key,
+        secret_key,
+    )
+    .await;
+
+    let _ticker_updater = ticker_updater(
+        app_state.clone(),
+        upbit_service.clone(),
+        buyer_service.clone(),
+    )
+    .await;
+
+    // cli start
     loop {
         match rx.next().await {
             Some(crate::ui::Event::Tick) => {
-                ui_state = ui::draw(&mut terminal, ui_state, &(*app_state.read().await), "")
-                    .await
-                    .unwrap();
+                ui_state = ui::draw(
+                    &mut terminal,
+                    ui_state,
+                    &(*app_state.read().await),
+                    &*DEBUG_MESSAGES.clone().read().await,
+                    &*REQ_REMAINS.clone().read().await,
+                )
+                .await
+                .unwrap();
             }
             Some(crate::ui::Event::UiEvent(e)) => match e {
                 event::Event::Key(key_event) => match key_event.code {
                     event::KeyCode::Char('q') => {
                         ui::rollback_ui(&mut terminal)?;
+                        REQ_REMAINS
+                            .read()
+                            .await
+                            .iter()
+                            .for_each(|x| println!("{}, {}, {}", x.0, x.1 .0, x.1 .1));
                         break;
                     }
                     event::KeyCode::Char('c')
@@ -270,6 +131,8 @@ async fn main() -> Result<()> {
                         if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
                     {
                         terminal.clear()?;
+                        *DEBUG_MESSAGES.write().await = vec![];
+                        *REQ_REMAINS.write().await = HashMap::new();
                     }
                     event::KeyCode::Char('j') => {
                         ui_state.scroll += 1;
@@ -286,4 +149,181 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn market_list_updater<U: UpbitService + 'static>(
+    app_state: Arc<RwLock<AppState>>,
+    upbit_service: Arc<U>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match upbit_service.market_list().await {
+                Ok(xs) => {
+                    let market_ids = xs
+                        .into_iter()
+                        .map(|x| x.market)
+                        .filter(|x| x.starts_with("KRW"))
+                        .collect();
+                    app_state.clone().write().await.market_ids = Arc::new(market_ids);
+                }
+                Err(e) => {
+                    append_debug_message(&format!("{}", e)).await;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    })
+}
+
+async fn candle_updater<U: UpbitService + 'static>(
+    app_state: Arc<RwLock<AppState>>,
+    upbit_service: Arc<U>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let market_ids = app_state
+                .read()
+                .await
+                .market_ids
+                .iter()
+                .map(|x| x.clone())
+                .collect_vec();
+
+            for market_id in market_ids.iter() {
+                match upbit_service
+                    .candles_minutes(MinuteUnit::_1, market_id, 200)
+                    .await
+                {
+                    Ok(xs) => {
+                        let mut new_history = (&*app_state.write().await.history).clone();
+                        new_history.insert(market_id.to_owned(), Arc::new(xs));
+                        app_state.write().await.history = Arc::new(new_history);
+                    }
+                    Err(e) => {
+                        append_debug_message(&format!("{}", e)).await;
+                    }
+                }
+            }
+
+            if market_ids.len() > 0 {
+                let now = Local::now();
+                let now_instant = tokio::time::Instant::now();
+
+                let next_time = now.duration_trunc(chrono::Duration::minutes(1)).unwrap()
+                    + chrono::Duration::minutes(1);
+                let next_instant = now_instant
+                    + tokio::time::Duration::from_millis(
+                        (next_time.timestamp_millis() - now.timestamp_millis()) as u64,
+                    );
+
+                tokio::time::sleep_until(next_instant).await;
+            }
+        }
+    })
+}
+
+async fn account_updater<U: UpbitService + 'static>(
+    app_state: Arc<RwLock<AppState>>,
+    upbit_service: Arc<U>,
+    access_key: String,
+    secret_key: String,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let accounts = upbit_service
+                .accounts(access_key.as_str(), secret_key.as_str())
+                .await;
+            match accounts {
+                Ok(xs) => {
+                    app_state.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
+                }
+                Err(e) => {
+                    append_debug_message(&format!("{}", e)).await;
+                }
+            }
+        }
+    })
+}
+
+async fn ticker_updater<U: UpbitService + 'static, B: BuyerService + 'static>(
+    app_state: Arc<RwLock<AppState>>,
+    upbit_service: Arc<U>,
+    buyer_service: Arc<B>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let market_ids = app_state
+                .read()
+                .await
+                .market_ids
+                .iter()
+                .map(|x| x.clone())
+                .collect_vec();
+
+            if market_ids.len() > 0 {
+                let mut stream = upbit_service
+                    .clone()
+                    .ticker_stream(&market_ids)
+                    .await
+                    .unwrap();
+
+                loop {
+                    let ticker = stream.next().await.unwrap();
+                    {
+                        let mut app_state1 = app_state.write().await;
+                        let mut new_last_tick = app_state1.last_tick.as_ref().clone();
+                        new_last_tick.insert(ticker.code.clone(), ticker);
+                        //let v = new_last_tick.keys().map(|x| x.clone()).collect::<Vec<_>>();
+                        //*DEBUG_MESSAGE.write().await = v.join(",");
+                        app_state1.last_tick = Arc::new(new_last_tick);
+                    }
+                    buyer_service.process(&*app_state.read().await).await;
+                    if *app_state.read().await.market_ids != market_ids {
+                        stream.close();
+                        break;
+                    }
+                }
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn test_stream() {
+        let upbit_service = Arc::new(UpbitServiceSimple::new());
+        let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
+
+        let app_state = Arc::new(RwLock::new(AppState {
+            accounts: Arc::new(HashSet::from_iter(vec![Account {
+                currency: "KRW-BTC".to_owned(),
+                balance: Decimal::from(1),
+                ..Account::default()
+            }])),
+            ..AppState::new()
+        }));
+
+        let _s = ticker_updater(app_state.clone(), upbit_service.clone(), buyer_service.clone()).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let mut market_ids = upbit_service
+            .market_list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.market)
+            .filter(|x| x.starts_with("KRW"))
+            .collect_vec();
+
+        app_state.write().await.market_ids = Arc::new(market_ids.clone());
+        println!("update");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        market_ids.remove(0);
+        app_state.write().await.market_ids = Arc::new(market_ids);
+        println!("update");
+        //s.await;
+    }
 }

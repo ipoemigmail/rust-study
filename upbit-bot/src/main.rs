@@ -5,47 +5,69 @@ mod upbit;
 
 use crate::domain::*;
 use anyhow::Result;
-use async_lock::RwLock;
 use chrono::prelude::*;
 use chrono::DurationRound;
-use crossterm::event::{self, KeyModifiers};
 use dotenv::dotenv;
 use futures::StreamExt;
 use itertools::Itertools;
 use rust_decimal::Decimal;
-use static_init::dynamic;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::FromIterator;
+use async_lock::RwLock;
+use async_lock::RwLockWriteGuard;
+use tracing::error;
+use tracing::info;
 
+use domain::ToLines;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use ui::ToLines;
 use upbit::*;
 
-#[dynamic]
-static DEBUG_MESSAGES: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(vec![]));
-#[dynamic]
-static REQ_REMAINS: Arc<RwLock<HashMap<String, (u32, u32)>>> =
-    Arc::new(RwLock::new(HashMap::new()));
+#[derive(Clone)]
+struct AppStateWriter {
+    app_state: Arc<RwLock<AppState>>,
+}
 
-pub async fn append_debug_message(message: &str) {
-    let mut messages = DEBUG_MESSAGES.write().await;
-    let now = chrono::Local::now();
-    messages.insert(0, format!("[{}] {}", now.to_rfc3339(), message));
-    if messages.len() > 5 {
-        let len = messages.len();
-        messages.remove(len - 1);
+impl AppStateWriter {
+    fn new(app_state: Arc<RwLock<AppState>>) -> AppStateWriter {
+        AppStateWriter { app_state }
+    }
+
+    fn buf(&self) -> std::io::Result<RwLockWriteGuard<AppState>> {
+        Ok(futures::executor::block_on(self.app_state.write()))
+        
+        //self.app_state
+        //    .write()
+        //    .map_err(|_err| std::io::Error::new(std::io::ErrorKind::Other, ""))
     }
 }
 
-pub async fn insert_req_remain(group: &str, min_remain: u32, sec_remain: u32) {
-    let mut req_remain = REQ_REMAINS.write().await;
-    req_remain.insert(group.to_owned(), (min_remain, sec_remain));
+impl std::io::Write for AppStateWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut self_buf = self.buf()?;
+        let mut new_log_messages = self_buf.log_messages.as_ref().clone();
+        new_log_messages.insert(0, std::str::from_utf8(buf).unwrap().trim().to_owned());
+        self_buf.log_messages = Arc::new(new_log_messages);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.buf()?.log_messages = Arc::new(vec![]);
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter for AppStateWriter {
+    type Writer = AppStateWriter;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
 }
 
 #[tokio::main]
+#[tracing::instrument]
 async fn main() -> Result<()> {
     dotenv().ok();
     let upbit_service = Arc::new(UpbitServiceSimple::new());
@@ -64,6 +86,11 @@ async fn main() -> Result<()> {
         }])),
         ..AppState::new()
     }));
+    tracing_subscriber::fmt()
+        .with_writer(AppStateWriter::new(app_state.clone()))
+        .with_ansi(false)
+        .init();
+
     let mut terminal = ui::create_terminal()?;
     ui::start_ui(&mut terminal)?;
 
@@ -94,60 +121,34 @@ async fn main() -> Result<()> {
 
     // cli start
     loop {
+        {
+            ui_state.main_messages = Arc::new(app_state.read().await.lines());
+            ui_state.req_remains = upbit_service.remain_req().await;
+            ui_state.debug_messages = app_state.read().await.log_messages.clone();
+        }
         match rx.next().await {
-            Some(crate::ui::Event::Tick) => {
-                ui_state = ui::draw(
-                    &mut terminal,
-                    ui_state,
-                    &(*app_state.read().await),
-                    &*DEBUG_MESSAGES.clone().read().await,
-                    &*REQ_REMAINS.clone().read().await,
-                )
-                .await
-                .unwrap();
+            Some(ui::Event::UiEvent(crossterm::event::Event::Key(key_event)))
+                if key_event.code == crossterm::event::KeyCode::Char('l')
+                    && (key_event
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)) =>
+            {
+                terminal.clear()?;
+                ui_state.debug_messages = Arc::new(vec![]);
+                upbit_service.clear_remain_req().await;
             }
-            Some(crate::ui::Event::UiEvent(e)) => match e {
-                event::Event::Key(key_event) => match key_event.code {
-                    event::KeyCode::Char('q') => {
-                        ui::rollback_ui(&mut terminal)?;
-                        REQ_REMAINS
-                            .read()
-                            .await
-                            .iter()
-                            .for_each(|x| println!("{}, {}, {}", x.0, x.1 .0, x.1 .1));
-                        break;
-                    }
-                    event::KeyCode::Char('c')
-                        if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
-                    {
-                        ui::rollback_ui(&mut terminal)?;
-                        break;
-                    }
-                    event::KeyCode::Char('k') => {
-                        ui_state.scroll -= 1;
-                        ui_state.scroll = ui_state.scroll.max(0);
-                    }
-                    event::KeyCode::Char('l')
-                        if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
-                    {
-                        terminal.clear()?;
-                        *DEBUG_MESSAGES.write().await = vec![];
-                        *REQ_REMAINS.write().await = HashMap::new();
-                    }
-                    event::KeyCode::Char('j') => {
-                        ui_state.scroll += 1;
-                        ui_state.scroll = ui_state
-                            .scroll
-                            .min(app_state.read().await.lines().len() as i32 - ui_state.height)
-                            .max(0);
-                    }
-                    _ => (),
-                },
-                _ => (),
-            },
+            Some(event) => {
+                ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
+                app_state.write().await.is_shutdown = ui_state.is_shutdown;
+                if ui_state.is_shutdown {
+                    break
+                }
+            }
             None => break,
         }
     }
+    let is_shutdown = app_state.read().await.is_shutdown;
+    error!("is_shutdown: {}", is_shutdown);
     Ok(())
 }
 
@@ -167,7 +168,7 @@ async fn market_list_updater<U: UpbitService + 'static>(
                     app_state.clone().write().await.market_ids = Arc::new(market_ids);
                 }
                 Err(e) => {
-                    append_debug_message(&format!("{}", e)).await;
+                    error!("{}", e)
                 }
             }
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -195,12 +196,12 @@ async fn candle_updater<U: UpbitService + 'static>(
                     .await
                 {
                     Ok(xs) => {
-                        let mut new_history = (&*app_state.write().await.history).clone();
+                        let mut new_history = (&*app_state.read().await.history).clone();
                         new_history.insert(market_id.to_owned(), Arc::new(xs));
                         app_state.write().await.history = Arc::new(new_history);
                     }
                     Err(e) => {
-                        append_debug_message(&format!("{}", e)).await;
+                        error!("{}", e)
                     }
                 }
             }
@@ -238,7 +239,7 @@ async fn account_updater<U: UpbitService + 'static>(
                     app_state.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
                 }
                 Err(e) => {
-                    append_debug_message(&format!("{}", e)).await;
+                    error!("{}", e)
                 }
             }
         }
@@ -268,19 +269,27 @@ async fn ticker_updater<U: UpbitService + 'static, B: BuyerService + 'static>(
                     .unwrap();
 
                 loop {
-                    let ticker = stream.next().await.unwrap();
-                    {
-                        let mut app_state1 = app_state.write().await;
-                        let mut new_last_tick = app_state1.last_tick.as_ref().clone();
-                        new_last_tick.insert(ticker.code.clone(), ticker);
-                        //let v = new_last_tick.keys().map(|x| x.clone()).collect::<Vec<_>>();
-                        //*DEBUG_MESSAGE.write().await = v.join(",");
-                        app_state1.last_tick = Arc::new(new_last_tick);
-                    }
-                    buyer_service.process(&*app_state.read().await).await;
-                    if *app_state.read().await.market_ids != market_ids {
-                        stream.close();
-                        break;
+                    match stream.next().await {
+                        Some(ticker) => {
+                            {
+                                let mut app_state1 = app_state.write().await;
+                                let mut new_last_tick = app_state1.last_tick.as_ref().clone();
+                                new_last_tick.insert(ticker.code.clone(), ticker);
+                                //let v = new_last_tick.keys().map(|x| x.clone()).collect::<Vec<_>>();
+                                //*DEBUG_MESSAGE.write().await = v.join(",");
+                                app_state1.last_tick = Arc::new(new_last_tick);
+                            }
+                            let app_state2 = app_state.read().await.clone();
+                            buyer_service.process(&app_state2).await;
+                            if *app_state.read().await.market_ids != market_ids {
+                                stream.close();
+                                break;
+                            }
+                        }
+                        None => {
+                            stream.close();
+                            break;
+                        }
                     }
                 }
             } else {
@@ -307,7 +316,12 @@ mod tests {
             ..AppState::new()
         }));
 
-        let _s = ticker_updater(app_state.clone(), upbit_service.clone(), buyer_service.clone()).await;
+        let _s = ticker_updater(
+            app_state.clone(),
+            upbit_service.clone(),
+            buyer_service.clone(),
+        )
+        .await;
         tokio::time::sleep(Duration::from_secs(2)).await;
         let mut market_ids = upbit_service
             .market_list()

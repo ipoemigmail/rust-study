@@ -1,3 +1,4 @@
+use async_lock::RwLock;
 use async_trait::async_trait;
 use futures::{channel::mpsc::UnboundedReceiver, SinkExt, StreamExt};
 use governor::clock::DefaultClock;
@@ -9,7 +10,8 @@ use jwt::SignWithKey;
 use reqwest::header::{self, HeaderMap};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha512};
-use std::collections::BTreeMap;
+use tracing::error;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::{fmt::Display, sync::Arc, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -77,6 +79,8 @@ pub trait UpbitService: Send + Sync {
         &self,
         market_ids: &Vec<String>,
     ) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error>;
+    async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>>;
+    async fn clear_remain_req(&self);
 }
 
 pub struct UpbitServiceSimple {
@@ -84,6 +88,7 @@ pub struct UpbitServiceSimple {
     default_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     market_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     candle_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    pub remain_req: RwLock<HashMap<String, (u32, u32)>>,
 }
 
 fn safe_limit(c: u32) -> u32 {
@@ -100,6 +105,7 @@ impl UpbitServiceSimple {
             default_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(500))),
             market_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
             candle_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
+            remain_req: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -111,7 +117,7 @@ async fn call_api_response<A>(
     client: &reqwest::Client,
     url: &str,
     header_map: Option<HeaderMap>,
-) -> Result<A, Error>
+) -> Result<(A, RemainReq), Error>
 where
     A: DeserializeOwned,
 {
@@ -133,16 +139,21 @@ where
         .map(|x| x.trim().to_owned().split("=").last().unwrap().to_owned())
         .collect_vec();
 
-    crate::insert_req_remain(
-        &info[0],
-        info[1].parse::<u32>().unwrap(),
-        info[2].parse::<u32>().unwrap(),
-    )
-    .await;
     let remaining_req = resp.headers().get("Remaining-Req").cloned();
     let resp_text = resp.text().await?;
     match serde_json::from_str::<'_, A>(resp_text.as_str()) {
-        v @ Ok(_) => v.map_err(|x| x.into()),
+        v @ Ok(_) => v
+            .map(|x| {
+                (
+                    x,
+                    RemainReq::new(
+                        &info[0],
+                        info[1].parse::<u32>().unwrap(),
+                        info[2].parse::<u32>().unwrap(),
+                    ),
+                )
+            })
+            .map_err(|x| x.into()),
         Err(e) => Err(Error::InternalError(format!(
             "{} - {}:{:?} ({})",
             e, url, remaining_req, resp_text
@@ -157,7 +168,16 @@ impl UpbitService for UpbitServiceSimple {
             limiter.until_ready().await;
         }
         let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn market_ticker_list(&self, market_ids: Vec<String>) -> Result<Vec<Ticker>, Error> {
@@ -165,7 +185,16 @@ impl UpbitService for UpbitServiceSimple {
             limiter.until_ready().await;
         }
         let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn candles_minutes(
@@ -181,7 +210,16 @@ impl UpbitService for UpbitServiceSimple {
             "{}/candles/minutes/{}?market={}&count={}",
             BASE_URL, unit, market_id, count
         );
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn accounts(&self, access_key: &str, secret_key: &str) -> Result<Vec<Account>, Error> {
@@ -196,7 +234,16 @@ impl UpbitService for UpbitServiceSimple {
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
         header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
-        call_api_response(&self.client, &url, Some(header_map)).await
+        match call_api_response(&self.client, &url, Some(header_map)).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn orders_chance(
@@ -220,7 +267,16 @@ impl UpbitService for UpbitServiceSimple {
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
         header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
-        call_api_response(&self.client, &url, Some(header_map)).await
+        match call_api_response(&self.client, &url, Some(header_map)).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn ticker_stream(
@@ -229,7 +285,7 @@ impl UpbitService for UpbitServiceSimple {
     ) -> Result<UnboundedReceiver<TickerWs>, Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let (ws_stream, _) = connect_async(WS_BASE_URL).await.expect("Failed to connect");
-        //println!("WebSocket handshake has been successfully completed");
+        //info!("WebSocket handshake has been successfully completed");
         let (mut write, mut read) = ws_stream.split();
         let cmd = format!(
             r#"[{{"ticket":"{}"}},{{"type":"ticker","codes":["{}"]}}]"#,
@@ -247,21 +303,29 @@ impl UpbitService for UpbitServiceSimple {
                             Ok(ticker) => match tx.unbounded_send(ticker) {
                                 Ok(_) => (),
                                 Err(e) => {
-                                    println!("{}", e);
+                                    error!("{}", e);
                                     break;
                                 }
                             },
-                            Err(e) => println!("{}", e),
+                            Err(e) => error!("{}", e),
                         }
                     }
                     Err(e) => {
-                        println!("{}", e);
+                        error!("{}", e);
                         break;
                     }
                 }
             }
         });
         Ok(rx)
+    }
+
+    async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>> {
+        Arc::new(self.remain_req.read().await.clone())
+    }
+
+    async fn clear_remain_req(&self) {
+        self.remain_req.write().await.clear()
     }
 }
 
@@ -271,6 +335,7 @@ pub struct UpbitServiceDummyAccount {
     default_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     market_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     candle_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    pub remain_req: RwLock<HashMap<String, (u32, u32)>>,
 }
 
 impl UpbitServiceDummyAccount {
@@ -284,6 +349,7 @@ impl UpbitServiceDummyAccount {
             default_rate_limiters: Arc::new(create_limiter(safe_limit(30), safe_limit(500))),
             market_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
             candle_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
+            remain_req: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -295,7 +361,16 @@ impl UpbitService for UpbitServiceDummyAccount {
             limiter.until_ready().await;
         }
         let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn market_ticker_list(&self, market_ids: Vec<String>) -> Result<Vec<Ticker>, Error> {
@@ -303,7 +378,16 @@ impl UpbitService for UpbitServiceDummyAccount {
             limiter.until_ready().await;
         }
         let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn candles_minutes(
@@ -319,7 +403,16 @@ impl UpbitService for UpbitServiceDummyAccount {
             "{}/candles/minutes/{}?market={}&count={}",
             BASE_URL, unit, market_id, count
         );
-        call_api_response(&self.client, &url, None).await
+        match call_api_response(&self.client, &url, None).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn accounts(&self, _access_key: &str, _secret_key: &str) -> Result<Vec<Account>, Error> {
@@ -354,6 +447,14 @@ impl UpbitService for UpbitServiceDummyAccount {
     ) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error> {
         todo!()
     }
+
+    async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>> {
+        Arc::new(self.remain_req.read().await.clone())
+    }
+
+    async fn clear_remain_req(&self) {
+        self.remain_req.write().await.clear()
+    }
 }
 
 fn create_limiter(
@@ -377,6 +478,6 @@ mod tests {
         let upbit_service = Arc::new(UpbitServiceSimple::new());
         let market_ids = vec!["KRW-BTC".to_owned()];
         let s = upbit_service.ticker_stream(&market_ids).await.unwrap();
-        s.for_each(|x| async move { println!("{:?}", x) }).await;
+        s.for_each(|x| async move { error!("{:?}", x) }).await;
     }
 }

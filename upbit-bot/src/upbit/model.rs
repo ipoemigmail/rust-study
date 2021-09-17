@@ -238,3 +238,16 @@ pub struct TickerWs {
     #[serde(rename = "stream_type")]
     pub stream_type: String,
 }
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct RemainReq {
+    pub group: String,
+    pub min: u32,
+    pub max: u32,
+}
+
+impl RemainReq {
+    pub fn new(group: &str, min: u32, max: u32) -> RemainReq {
+        RemainReq { group: group.to_owned(), min, max }
+    }
+}

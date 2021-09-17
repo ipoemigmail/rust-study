@@ -1,31 +1,35 @@
-use crate::{
-    ui::ToLines,
-    upbit::{model::TickerWs, Account, Candle, UpbitService},
-};
+use crate::upbit::{model::TickerWs, Account, Candle, UpbitService};
 use async_trait::async_trait;
 use format_num::format_num;
 use itertools::*;
 use rust_decimal::prelude::*;
+use tracing::info;
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::{HashMap, HashSet}, sync::{Arc}};
 
+pub trait ToLines {
+    fn lines(&self) -> Vec<String>;
+}
+
+#[derive(Debug, Clone)]
 pub struct AppState {
+    pub is_shutdown: bool,
     pub market_ids: Arc<Vec<String>>,
     pub history: Arc<HashMap<String, Arc<Vec<Candle>>>>,
     pub last_tick: Arc<HashMap<String, TickerWs>>,
     pub accounts: Arc<HashSet<Account>>,
+    pub log_messages: Arc<Vec<String>>,
 }
 
 impl AppState {
     pub fn new() -> AppState {
         AppState {
+            is_shutdown: false,
             market_ids: Arc::new(vec![]),
             history: Arc::new(HashMap::new()),
             last_tick: Arc::new(HashMap::new()),
             accounts: Arc::new(HashSet::new()),
+            log_messages: Arc::new(vec![]),
         }
     }
 }
@@ -120,12 +124,8 @@ impl<U: UpbitService> BuyerService for BuyerServiceSimple<U> {
                     let avg_volume = volume_sum / Decimal::from(candles.len());
                     match app_state.last_tick.get(market_id) {
                         Some(ticker) => {
-                            if Decimal::from(ticker.trade_volume) > avg_volume * Decimal::from_f64(1.3).unwrap() {
-                                crate::append_debug_message(&format!(
-                                    "abnormal volumne: {} -> avg: {}, cur: {}",
-                                    market_id, avg_volume, ticker.trade_volume
-                                ))
-                                .await;
+                            if Decimal::from(ticker.trade_volume) > avg_volume * Decimal::from_f64(2.0).unwrap() {
+                                info!("abnormal volumne: {} -> avg: {}, cur: {}", market_id, avg_volume, ticker.trade_volume);
                             }
                         }
                         None => (),

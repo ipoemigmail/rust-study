@@ -5,16 +5,21 @@ mod upbit;
 
 use crate::domain::*;
 use anyhow::Result;
+use async_lock::RwLock;
+use async_lock::RwLockWriteGuard;
 use chrono::prelude::*;
 use chrono::DurationRound;
 use dotenv::dotenv;
+use futures::channel::mpsc;
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::future::AbortHandle;
+use futures::future::Abortable;
+use futures::SinkExt;
 use futures::StreamExt;
 use itertools::Itertools;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::iter::FromIterator;
-use async_lock::RwLock;
-use async_lock::RwLockWriteGuard;
 use tracing::error;
 use tracing::info;
 
@@ -36,7 +41,7 @@ impl AppStateWriter {
 
     fn buf(&self) -> std::io::Result<RwLockWriteGuard<AppState>> {
         Ok(futures::executor::block_on(self.app_state.write()))
-        
+
         //self.app_state
         //    .write()
         //    .map_err(|_err| std::io::Error::new(std::io::ErrorKind::Other, ""))
@@ -98,13 +103,11 @@ async fn main() -> Result<()> {
     let mut rx = ui::start_ui_ticker(tick_rate);
     let mut ui_state = ui::UiState::new();
 
-    // candle updater
+    let candle_updater = candle_updater(app_state.clone(), upbit_service.clone()).await;
 
-    let _candle_updater = candle_updater(app_state.clone(), upbit_service.clone()).await;
+    let market_list_updater = market_list_updater(app_state.clone(), upbit_service.clone()).await;
 
-    let _market_list_updater = market_list_updater(app_state.clone(), upbit_service.clone()).await;
-
-    let _account_updater = account_updater(
+    let account_updater = account_updater(
         app_state.clone(),
         upbit_service.clone(),
         access_key,
@@ -112,12 +115,21 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    let _ticker_updater = ticker_updater(
-        app_state.clone(),
-        upbit_service.clone(),
-        buyer_service.clone(),
-    )
-    .await;
+    let (ticker_updater, mut ticker_stream) =
+        ticker_updater(app_state.clone(), upbit_service.clone()).await;
+
+    let _app_state = app_state.clone();
+    let buyer_handle = tokio::spawn(async move {
+        loop {
+            match ticker_stream.next().await {
+                Some(_) => {
+                    let __app_state = _app_state.read().await.clone();
+                    buyer_service.process(&__app_state).await;
+                }
+                None => (),
+            }
+        }
+    });
 
     // cli start
     loop {
@@ -141,14 +153,19 @@ async fn main() -> Result<()> {
                 ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
                 app_state.write().await.is_shutdown = ui_state.is_shutdown;
                 if ui_state.is_shutdown {
-                    break
+                    break;
                 }
             }
             None => break,
         }
     }
     let is_shutdown = app_state.read().await.is_shutdown;
-    error!("is_shutdown: {}", is_shutdown);
+    candle_updater.abort();
+    market_list_updater.abort();
+    account_updater.abort();
+    ticker_updater.abort();
+    buyer_handle.abort();
+    println!("is_shutdown: {}", is_shutdown);
     Ok(())
 }
 
@@ -246,12 +263,12 @@ async fn account_updater<U: UpbitService + 'static>(
     })
 }
 
-async fn ticker_updater<U: UpbitService + 'static, B: BuyerService + 'static>(
+async fn ticker_updater<U: UpbitService + 'static>(
     app_state: Arc<RwLock<AppState>>,
     upbit_service: Arc<U>,
-    buyer_service: Arc<B>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> (JoinHandle<()>, UnboundedReceiver<TickerWs>) {
+    let (tx, rx) = mpsc::unbounded();
+    let handle = tokio::spawn(async move {
         loop {
             let market_ids = app_state
                 .read()
@@ -274,17 +291,16 @@ async fn ticker_updater<U: UpbitService + 'static, B: BuyerService + 'static>(
                             {
                                 let mut app_state1 = app_state.write().await;
                                 let mut new_last_tick = app_state1.last_tick.as_ref().clone();
-                                new_last_tick.insert(ticker.code.clone(), ticker);
+                                new_last_tick.insert(ticker.code.clone(), ticker.clone());
                                 //let v = new_last_tick.keys().map(|x| x.clone()).collect::<Vec<_>>();
                                 //*DEBUG_MESSAGE.write().await = v.join(",");
                                 app_state1.last_tick = Arc::new(new_last_tick);
                             }
-                            let app_state2 = app_state.read().await.clone();
-                            buyer_service.process(&app_state2).await;
                             if *app_state.read().await.market_ids != market_ids {
                                 stream.close();
                                 break;
                             }
+                            tx.unbounded_send(ticker.clone());
                         }
                         None => {
                             stream.close();
@@ -296,16 +312,29 @@ async fn ticker_updater<U: UpbitService + 'static, B: BuyerService + 'static>(
                 tokio::task::yield_now().await;
             }
         }
-    })
+    });
+    (handle, rx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test1() {
+        let a = tokio::spawn(async {
+            loop {
+                println!("1");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+        a.abort();
+        println!("{:?}", a.await);
+    }
+
     #[tokio::test]
     async fn test_stream() {
         let upbit_service = Arc::new(UpbitServiceSimple::new());
-        let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
 
         let app_state = Arc::new(RwLock::new(AppState {
             accounts: Arc::new(HashSet::from_iter(vec![Account {
@@ -316,12 +345,7 @@ mod tests {
             ..AppState::new()
         }));
 
-        let _s = ticker_updater(
-            app_state.clone(),
-            upbit_service.clone(),
-            buyer_service.clone(),
-        )
-        .await;
+        ticker_updater(app_state.clone(), upbit_service.clone()).await;
         tokio::time::sleep(Duration::from_secs(2)).await;
         let mut market_ids = upbit_service
             .market_list()

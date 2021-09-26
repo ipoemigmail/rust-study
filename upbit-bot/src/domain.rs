@@ -5,7 +5,10 @@ use itertools::*;
 use rust_decimal::prelude::*;
 use tracing::info;
 
-use std::{collections::{HashMap, HashSet}, sync::{Arc}};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 pub trait ToLines {
     fn lines(&self) -> Vec<String>;
@@ -70,10 +73,9 @@ impl ToLines for AppState {
             .clone()
             .into_iter()
             .map(|x| x.1.first().unwrap().candle_date_time_kst.to_owned())
-            .sorted()
-            .group_by(|x| x.to_owned())
+            .into_group_map_by(|x| x.to_owned())
             .into_iter()
-            .map(|(x, xs)| format!("{} -> {}", x, xs.count()))
+            .map(|(x, xs)| format!("{} -> {}", x, xs.len()))
             .collect_vec();
 
         let mut result = vec![format!(
@@ -111,26 +113,47 @@ impl<U: UpbitService> BuyerServiceSimple<U> {
     }
 }
 
+fn moving_average<'a, I: Iterator<Item = &'a Candle> + Clone>(candles: I) -> f64 {
+    let len = candles.clone().count() as f64;
+    let sum = candles
+        .map(|x| x.trade_price.to_f64().unwrap_or(0.0))
+        .sum::<f64>();
+    sum / len
+}
+
 #[async_trait]
 impl<U: UpbitService> BuyerService for BuyerServiceSimple<U> {
     async fn process(&self, app_state: &AppState) {
         for market_id in app_state.market_ids.iter() {
             match app_state.history.get(market_id) {
-                Some(candles) => {
-                    let volume_sum: Decimal = candles
-                        .iter()
-                        .map(|x| Decimal::from(x.candle_acc_trade_volume))
-                        .sum();
-                    let avg_volume = volume_sum / Decimal::from(candles.len());
-                    match app_state.last_tick.get(market_id) {
-                        Some(ticker) => {
-                            if Decimal::from(ticker.trade_volume) > avg_volume * Decimal::from_f64(2.0).unwrap() {
-                                info!("abnormal volumne: {} -> avg: {}, cur: {}", market_id, avg_volume, ticker.trade_volume);
-                            }
+                Some(candles) => match app_state.last_tick.get(market_id) {
+                    Some(ticker) => {
+                        let moving_avg5 = moving_average(candles.iter().take(5));
+                        let moving_avg20 = moving_average(candles.iter().take(20));
+
+                        let prev_moving_avg5 = moving_average(candles.iter().skip(1).take(5));
+                        let prev_moving_avg20 = moving_average(candles.iter().skip(1).take(20));
+
+                        let is_golden_cross =
+                            prev_moving_avg5 <= prev_moving_avg20 && moving_avg5 > moving_avg20;
+
+                        let volume_sum: Decimal = candles
+                            .iter()
+                            .map(|x| Decimal::from(x.candle_acc_trade_volume))
+                            .sum();
+                        let avg_volume = volume_sum / Decimal::from(candles.len());
+                        let is_abnormal_volume = Decimal::from(ticker.trade_volume)
+                            > avg_volume * Decimal::from_f64(2.0).unwrap();
+
+                        if is_golden_cross && is_abnormal_volume {
+                            info!(
+                                "{} -> moving_avg5: {}, moving_avg20: {}, avg volumne: {}, cur volume: {}",
+                                market_id, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
+                            );
                         }
-                        None => (),
                     }
-                }
+                    None => (),
+                },
                 None => (),
             }
         }

@@ -16,7 +16,7 @@ use futures::future::AbortHandle;
 use futures::future::Abortable;
 use futures::SinkExt;
 use futures::StreamExt;
-use itertools::Itertools;
+use itertools::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::iter::FromIterator;

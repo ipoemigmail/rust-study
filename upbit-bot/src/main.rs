@@ -6,22 +6,19 @@ mod upbit;
 use crate::domain::*;
 use anyhow::Result;
 use async_lock::RwLock;
-use async_lock::RwLockWriteGuard;
 use chrono::prelude::*;
 use chrono::DurationRound;
 use dotenv::dotenv;
+use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::future::AbortHandle;
-use futures::future::Abortable;
-use futures::SinkExt;
 use futures::StreamExt;
+use futures::future;
 use itertools::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use tracing::error;
-use tracing::info;
 
 use domain::ToLines;
 use std::sync::Arc;
@@ -32,34 +29,66 @@ use upbit::*;
 #[derive(Clone)]
 struct AppStateWriter {
     app_state: Arc<RwLock<AppState>>,
+    tx: futures::channel::mpsc::Sender<AppStateWriterMsg>,
+    writer: Arc<JoinHandle<()>>,
+}
+
+enum AppStateWriterMsg {
+    Write(Vec<u8>),
+    Flush,
 }
 
 impl AppStateWriter {
     fn new(app_state: Arc<RwLock<AppState>>) -> AppStateWriter {
-        AppStateWriter { app_state }
+        let (tx, mut rx) = futures::channel::mpsc::channel::<AppStateWriterMsg>(512);
+        let _app_state = app_state.clone();
+        let writer = tokio::spawn(async move {
+            loop {
+                match rx.next().await {
+                    Some(AppStateWriterMsg::Write(msg)) => {
+                        let mut app_state_guard = _app_state.write().await;
+                        let mut new_log_messages = app_state_guard.log_messages.as_ref().clone();
+                        new_log_messages.insert(
+                            0,
+                            std::str::from_utf8(msg.as_slice())
+                                .unwrap()
+                                .trim()
+                                .to_owned(),
+                        );
+                        app_state_guard.log_messages = Arc::new(new_log_messages);
+                    }
+                    Some(AppStateWriterMsg::Flush) => {
+                        let mut app_state_guard = _app_state.write().await;
+                        app_state_guard.log_messages = Arc::new(vec![]);
+                    }
+                    None => break,
+                }
+            }
+        });
+        AppStateWriter {
+            app_state,
+            tx,
+            writer: Arc::new(writer),
+        }
     }
 
-    fn buf(&self) -> std::io::Result<RwLockWriteGuard<AppState>> {
-        Ok(futures::executor::block_on(self.app_state.write()))
-
-        //self.app_state
-        //    .write()
-        //    .map_err(|_err| std::io::Error::new(std::io::ErrorKind::Other, ""))
+    pub async fn close(&mut self) -> Result<(), futures::channel::mpsc::SendError> {
+        self.tx.close().await
     }
 }
 
 impl std::io::Write for AppStateWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut self_buf = self.buf()?;
-        let mut new_log_messages = self_buf.log_messages.as_ref().clone();
-        new_log_messages.insert(0, std::str::from_utf8(buf).unwrap().trim().to_owned());
-        self_buf.log_messages = Arc::new(new_log_messages);
-        Ok(buf.len())
+        self.tx
+            .try_send(AppStateWriterMsg::Write(buf.to_vec()))
+            .map(|_| buf.len())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.buf()?.log_messages = Arc::new(vec![]);
-        Ok(())
+        self.tx
+            .try_send(AppStateWriterMsg::Flush)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
     }
 }
 
@@ -72,16 +101,20 @@ impl tracing_subscriber::fmt::MakeWriter for AppStateWriter {
 }
 
 #[tokio::main]
-#[tracing::instrument]
 async fn main() -> Result<()> {
     dotenv().ok();
-    let upbit_service = Arc::new(UpbitServiceSimple::new());
-    let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
-
     let access_key = std::env::var("ACCESS_KEY")
         .map_err(|_| anyhow::format_err!("ACCESS_KEY was not found in environment var"))?;
     let secret_key = std::env::var("SECRET_KEY")
         .map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
+
+    //let upbit_service = Arc::new(UpbitServiceSimple::new(&access_key, &secret_key));
+    let upbit_service = Arc::new(UpbitServiceDummyAccount::new_with_amount(
+        &access_key,
+        &secret_key,
+        1_000_000,
+    ));
+    let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
 
     let app_state = Arc::new(RwLock::new(AppState {
         accounts: Arc::new(HashSet::from_iter(vec![Account {
@@ -95,6 +128,8 @@ async fn main() -> Result<()> {
         .with_writer(AppStateWriter::new(app_state.clone()))
         .with_ansi(false)
         .init();
+    //let a = upbit_service.accounts(&access_key, &secret_key).await.unwrap();
+    //info!("{}", serde_json::to_string(&a).unwrap());
 
     let mut terminal = ui::create_terminal()?;
     ui::start_ui(&mut terminal)?;
@@ -107,13 +142,7 @@ async fn main() -> Result<()> {
 
     let market_list_updater = market_list_updater(app_state.clone(), upbit_service.clone()).await;
 
-    let account_updater = account_updater(
-        app_state.clone(),
-        upbit_service.clone(),
-        access_key,
-        secret_key,
-    )
-    .await;
+    let account_updater = account_updater(app_state.clone(), upbit_service.clone()).await;
 
     let (ticker_updater, mut ticker_stream) =
         ticker_updater(app_state.clone(), upbit_service.clone()).await;
@@ -243,14 +272,10 @@ async fn candle_updater<U: UpbitService + 'static>(
 async fn account_updater<U: UpbitService + 'static>(
     app_state: Arc<RwLock<AppState>>,
     upbit_service: Arc<U>,
-    access_key: String,
-    secret_key: String,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let accounts = upbit_service
-                .accounts(access_key.as_str(), secret_key.as_str())
-                .await;
+            let accounts = upbit_service.accounts().await;
             match accounts {
                 Ok(xs) => {
                     app_state.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
@@ -300,7 +325,10 @@ async fn ticker_updater<U: UpbitService + 'static>(
                                 stream.close();
                                 break;
                             }
-                            tx.unbounded_send(ticker.clone());
+                            match tx.unbounded_send(ticker.clone()) {
+                                Ok(_) => (),
+                                Err(err) => error!("{}", err),
+                            }
                         }
                         None => {
                             stream.close();
@@ -334,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream() {
-        let upbit_service = Arc::new(UpbitServiceSimple::new());
+        let upbit_service = Arc::new(UpbitServiceSimple::new("", ""));
 
         let app_state = Arc::new(RwLock::new(AppState {
             accounts: Arc::new(HashSet::from_iter(vec![Account {

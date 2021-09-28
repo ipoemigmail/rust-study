@@ -8,13 +8,17 @@ use hmac::{Hmac, NewMac};
 use itertools::Itertools;
 use jwt::SignWithKey;
 use reqwest::header::{self, HeaderMap};
+use reqwest::Request;
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha512};
-use tracing::error;
+use static_init::dynamic;
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::{fmt::Display, sync::Arc, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::error;
 use uuid::Uuid;
 
 pub mod model;
@@ -58,6 +62,28 @@ impl Display for MinuteUnit {
     }
 }
 
+fn get_unit_price(cur_price: Decimal) -> Decimal {
+    if cur_price >= Decimal::from(2_000_000) {
+        Decimal::from(1_000)
+    } else if cur_price >= Decimal::from(1_000_000) && cur_price < Decimal::from(2_000_000) {
+        Decimal::from(500)
+    } else if cur_price >= Decimal::from(500_000) && cur_price < Decimal::from(1_000_000) {
+        Decimal::from(100)
+    } else if cur_price >= Decimal::from(100_000) && cur_price < Decimal::from(500_000) {
+        Decimal::from(50)
+    } else if cur_price >= Decimal::from(10_000) && cur_price < Decimal::from(100_000) {
+        Decimal::from(10)
+    } else if cur_price >= Decimal::from(1_000) && cur_price < Decimal::from(10_000) {
+        Decimal::from(5)
+    } else if cur_price >= Decimal::from(100) && cur_price < Decimal::from(1_000) {
+        Decimal::from(1)
+    } else if cur_price >= Decimal::from(10) && cur_price < Decimal::from(100) {
+        Decimal::from(1)
+    } else {
+        Decimal::from_f32(0.01).unwrap()
+    }
+}
+
 #[async_trait]
 pub trait UpbitService: Send + Sync {
     async fn market_list(&self) -> Result<Vec<MarketInfo>, Error>;
@@ -68,23 +94,21 @@ pub trait UpbitService: Send + Sync {
         market_id: &str,
         count: u8,
     ) -> Result<Vec<Candle>, Error>;
-    async fn accounts(&self, access_key: &str, secret_key: &str) -> Result<Vec<Account>, Error>;
-    async fn orders_chance(
-        &self,
-        access_key: &str,
-        secret_key: &str,
-        market_id: &str,
-    ) -> Result<OrderChance, Error>;
+    async fn accounts(&self) -> Result<Vec<Account>, Error>;
+    async fn orders_chance(&self, market_id: &str) -> Result<OrderChance, Error>;
     async fn ticker_stream(
         &self,
         market_ids: &Vec<String>,
     ) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error>;
     async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>>;
     async fn clear_remain_req(&self);
+    async fn request_order(&self, order_req: OrderRequest) -> Result<OrderResponse, Error>;
 }
 
 pub struct UpbitServiceSimple {
     client: reqwest::Client,
+    access_key: String,
+    secret_key: String,
     default_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     market_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     candle_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
@@ -96,12 +120,14 @@ fn safe_limit(c: u32) -> u32 {
 }
 
 impl UpbitServiceSimple {
-    pub fn new() -> UpbitServiceSimple {
+    pub fn new(access_key: &str, secret_key: &str) -> UpbitServiceSimple {
         UpbitServiceSimple {
             client: reqwest::ClientBuilder::new()
                 .connect_timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
+            access_key: access_key.to_owned(),
+            secret_key: secret_key.to_owned(),
             default_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(500))),
             market_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
             candle_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
@@ -113,7 +139,7 @@ impl UpbitServiceSimple {
 const BASE_URL: &str = "https://api.upbit.com/v1";
 const WS_BASE_URL: &str = "ws://api.upbit.com/websocket/v1";
 
-async fn call_api_response<A>(
+async fn call_get_request<A>(
     client: &reqwest::Client,
     url: &str,
     header_map: Option<HeaderMap>,
@@ -127,6 +153,35 @@ where
     }
     .build()
     .unwrap();
+
+    call_request(req, client).await
+}
+
+async fn call_post_request<A>(
+    client: &reqwest::Client,
+    url: &str,
+    data: &HashMap<String, String>,
+    header_map: Option<HeaderMap>,
+) -> Result<(A, RemainReq), Error>
+where
+    A: DeserializeOwned,
+{
+    let req = match header_map {
+        Some(hm) => client.post(url).headers(hm),
+        None => client.get(url),
+    }
+    .json(&data)
+    .build()
+    .unwrap();
+
+    call_request(req, client).await
+}
+
+async fn call_request<A>(req: Request, client: &reqwest::Client) -> Result<(A, RemainReq), Error>
+where
+    A: DeserializeOwned,
+{
+    let url = req.url().as_str().to_owned();
     let resp = client.execute(req).await?;
     //Remaining-Req: group=default; min=1799; sec=29
     let info = resp
@@ -161,6 +216,46 @@ where
     }
 }
 
+async fn ticker_stream(
+    market_ids: &Vec<String>,
+) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let (ws_stream, _) = connect_async(WS_BASE_URL).await.expect("Failed to connect");
+    //info!("WebSocket handshake has been successfully completed");
+    let (mut write, mut read) = ws_stream.split();
+    let cmd = format!(
+        r#"[{{"ticket":"{}"}},{{"type":"ticker","codes":["{}"]}}]"#,
+        uuid::Uuid::new_v4().to_owned(),
+        market_ids.join("\",\"")
+    );
+
+    write.send(Message::text(cmd)).await?;
+    tokio::spawn(async move {
+        loop {
+            match read.next().await.unwrap() {
+                Ok(m) => {
+                    let data = m.into_data();
+                    match serde_json::from_slice::<'_, TickerWs>(data.as_slice()) {
+                        Ok(ticker) => match tx.unbounded_send(ticker) {
+                            Ok(_) => (),
+                            Err(e) => {
+                                error!("{}", e);
+                                break;
+                            }
+                        },
+                        Err(e) => error!("{}", e),
+                    }
+                }
+                Err(e) => {
+                    error!("{}", e);
+                    break;
+                }
+            }
+        }
+    });
+    Ok(rx)
+}
+
 #[async_trait]
 impl UpbitService for UpbitServiceSimple {
     async fn market_list(&self) -> Result<Vec<MarketInfo>, Error> {
@@ -168,7 +263,7 @@ impl UpbitService for UpbitServiceSimple {
             limiter.until_ready().await;
         }
         let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -185,7 +280,7 @@ impl UpbitService for UpbitServiceSimple {
             limiter.until_ready().await;
         }
         let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -210,7 +305,7 @@ impl UpbitService for UpbitServiceSimple {
             "{}/candles/minutes/{}?market={}&count={}",
             BASE_URL, unit, market_id, count
         );
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -222,19 +317,19 @@ impl UpbitService for UpbitServiceSimple {
         }
     }
 
-    async fn accounts(&self, access_key: &str, secret_key: &str) -> Result<Vec<Account>, Error> {
+    async fn accounts(&self) -> Result<Vec<Account>, Error> {
         for limiter in self.default_rate_limiters.iter() {
             limiter.until_ready().await;
         }
         let url = format!("{}/accounts", BASE_URL);
-        let key: Hmac<Sha512> = Hmac::new_from_slice(secret_key.as_bytes()).unwrap();
+        let key: Hmac<Sha512> = Hmac::new_from_slice(self.secret_key.as_bytes()).unwrap();
         let mut claims = BTreeMap::new();
-        claims.insert("access_key", access_key.to_owned());
+        claims.insert("access_key", self.access_key.to_owned());
         claims.insert("nonce", Uuid::new_v4().to_string());
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
         header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
-        match call_api_response(&self.client, &url, Some(header_map)).await {
+        match call_get_request(&self.client, &url, Some(header_map)).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -246,28 +341,23 @@ impl UpbitService for UpbitServiceSimple {
         }
     }
 
-    async fn orders_chance(
-        &self,
-        access_key: &str,
-        secret_key: &str,
-        market_id: &str,
-    ) -> Result<OrderChance, Error> {
+    async fn orders_chance(&self, market_id: &str) -> Result<OrderChance, Error> {
         for limiter in self.default_rate_limiters.iter() {
             limiter.until_ready().await;
         }
         let query_string = format!("market={}", market_id);
         let url = format!("{}/orders/chance?{}", BASE_URL, query_string);
         let query_hash = Sha512::digest(query_string.as_bytes());
-        let key: Hmac<Sha512> = Hmac::new_from_slice(secret_key.as_bytes()).unwrap();
+        let key: Hmac<Sha512> = Hmac::new_from_slice(self.secret_key.as_bytes()).unwrap();
         let mut claims = BTreeMap::new();
-        claims.insert("access_key", access_key.to_owned());
+        claims.insert("access_key", self.access_key.to_owned());
         claims.insert("nonce", Uuid::new_v4().to_string());
         claims.insert("query_hash", format!("{:x}", query_hash));
         claims.insert("query_hash_alg", "SHA512".to_owned());
         let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
         let mut header_map = HeaderMap::new();
         header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
-        match call_api_response(&self.client, &url, Some(header_map)).await {
+        match call_get_request(&self.client, &url, Some(header_map)).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -283,41 +373,7 @@ impl UpbitService for UpbitServiceSimple {
         &self,
         market_ids: &Vec<String>,
     ) -> Result<UnboundedReceiver<TickerWs>, Error> {
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-        let (ws_stream, _) = connect_async(WS_BASE_URL).await.expect("Failed to connect");
-        //info!("WebSocket handshake has been successfully completed");
-        let (mut write, mut read) = ws_stream.split();
-        let cmd = format!(
-            r#"[{{"ticket":"{}"}},{{"type":"ticker","codes":["{}"]}}]"#,
-            uuid::Uuid::new_v4().to_owned(),
-            market_ids.join("\",\"")
-        );
-
-        write.send(Message::text(cmd)).await?;
-        tokio::spawn(async move {
-            loop {
-                match read.next().await.unwrap() {
-                    Ok(m) => {
-                        let data = m.into_data();
-                        match serde_json::from_slice::<'_, TickerWs>(data.as_slice()) {
-                            Ok(ticker) => match tx.unbounded_send(ticker) {
-                                Ok(_) => (),
-                                Err(e) => {
-                                    error!("{}", e);
-                                    break;
-                                }
-                            },
-                            Err(e) => error!("{}", e),
-                        }
-                    }
-                    Err(e) => {
-                        error!("{}", e);
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(rx)
+        ticker_stream(market_ids).await
     }
 
     async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>> {
@@ -327,10 +383,61 @@ impl UpbitService for UpbitServiceSimple {
     async fn clear_remain_req(&self) {
         self.remain_req.write().await.clear()
     }
+
+    async fn request_order(&self, order_req: OrderRequest) -> Result<OrderResponse, Error> {
+        for limiter in self.default_rate_limiters.iter() {
+            limiter.until_ready().await;
+        }
+        let mut data = HashMap::new();
+        data.insert("market".to_owned(), order_req.market);
+        data.insert(
+            "side".to_owned(),
+            serde_json::to_string(&order_req.side).unwrap(),
+        );
+        data.insert("volume".to_owned(), order_req.volume.to_string());
+        data.insert(
+            "ord_type".to_owned(),
+            serde_json::to_string(&order_req.order_type).unwrap(),
+        );
+
+        let mut sb = vec![];
+        for (k, v) in data.iter() {
+            sb.push(format!("{}={}", k, v));
+        }
+
+        let query_string = sb.join("&");
+        let query_hash = Sha512::digest(query_string.as_bytes());
+        let key: Hmac<Sha512> = Hmac::new_from_slice(self.secret_key.as_bytes()).unwrap();
+
+        let mut claims = BTreeMap::new();
+        claims.insert("access_key", self.access_key.to_owned());
+        claims.insert("nonce", Uuid::new_v4().to_string());
+        claims.insert("query_hash", format!("{:x}", query_hash));
+        claims.insert("query_hash_alg", "SHA512".to_owned());
+
+        let token_str = format!("Bearer {}", claims.sign_with_key(&key).unwrap());
+
+        let mut header_map = HeaderMap::new();
+        header_map.append(header::AUTHORIZATION, token_str.parse().unwrap());
+
+        let url = format!("{}/orders", BASE_URL);
+        match call_post_request(&self.client, &url, &data, Some(header_map)).await {
+            Ok((market_info, remain_req)) => {
+                self.remain_req
+                    .write()
+                    .await
+                    .insert(remain_req.group, (remain_req.min, remain_req.max));
+                Ok(market_info)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 pub struct UpbitServiceDummyAccount {
     client: reqwest::Client,
+    access_key: String,
+    secret_key: String,
     accounts: Arc<Vec<Account>>,
     default_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     market_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
@@ -339,12 +446,14 @@ pub struct UpbitServiceDummyAccount {
 }
 
 impl UpbitServiceDummyAccount {
-    pub fn new() -> UpbitServiceDummyAccount {
+    pub fn new(access_key: &str, secret_key: &str) -> UpbitServiceDummyAccount {
         UpbitServiceDummyAccount {
             client: reqwest::ClientBuilder::new()
                 .connect_timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
+            access_key: access_key.to_owned(),
+            secret_key: secret_key.to_owned(),
             accounts: Arc::new(vec![]),
             default_rate_limiters: Arc::new(create_limiter(safe_limit(30), safe_limit(500))),
             market_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
@@ -352,7 +461,26 @@ impl UpbitServiceDummyAccount {
             remain_req: RwLock::new(HashMap::new()),
         }
     }
+
+    pub fn new_with_amount(
+        access_key: &str,
+        secret_key: &str,
+        amount: i32,
+    ) -> UpbitServiceDummyAccount {
+        let mut n = Self::new(access_key, secret_key);
+        let mut account = Account::default();
+        account.currency = "KRW".to_owned();
+        account.balance = Decimal::from_i32(amount).unwrap();
+        account.avg_buy_price = Decimal::ZERO;
+        account.avg_buy_price_modified = true;
+        account.unit_currency = "KRW".to_owned();
+        n.accounts = Arc::new(vec![account]);
+        n
+    }
 }
+
+#[dynamic(lazy)]
+static FEE_FACTOR: Decimal = Decimal::from_f64(0.02).unwrap();
 
 #[async_trait]
 impl UpbitService for UpbitServiceDummyAccount {
@@ -361,7 +489,7 @@ impl UpbitService for UpbitServiceDummyAccount {
             limiter.until_ready().await;
         }
         let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -378,7 +506,7 @@ impl UpbitService for UpbitServiceDummyAccount {
             limiter.until_ready().await;
         }
         let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -403,7 +531,7 @@ impl UpbitService for UpbitServiceDummyAccount {
             "{}/candles/minutes/{}?market={}&count={}",
             BASE_URL, unit, market_id, count
         );
-        match call_api_response(&self.client, &url, None).await {
+        match call_get_request(&self.client, &url, None).await {
             Ok((market_info, remain_req)) => {
                 self.remain_req
                     .write()
@@ -415,19 +543,14 @@ impl UpbitService for UpbitServiceDummyAccount {
         }
     }
 
-    async fn accounts(&self, _access_key: &str, _secret_key: &str) -> Result<Vec<Account>, Error> {
+    async fn accounts(&self) -> Result<Vec<Account>, Error> {
         for limiter in self.default_rate_limiters.iter() {
             limiter.until_ready().await;
         }
         Ok((*self.accounts).clone())
     }
 
-    async fn orders_chance(
-        &self,
-        _access_key: &str,
-        _secret_key: &str,
-        market_id: &str,
-    ) -> Result<OrderChance, Error> {
+    async fn orders_chance(&self, market_id: &str) -> Result<OrderChance, Error> {
         for limiter in self.default_rate_limiters.iter() {
             limiter.until_ready().await;
         }
@@ -443,9 +566,9 @@ impl UpbitService for UpbitServiceDummyAccount {
 
     async fn ticker_stream(
         &self,
-        _market_ids: &Vec<String>,
+        market_ids: &Vec<String>,
     ) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error> {
-        todo!()
+        ticker_stream(market_ids).await
     }
 
     async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>> {
@@ -454,6 +577,68 @@ impl UpbitService for UpbitServiceDummyAccount {
 
     async fn clear_remain_req(&self) {
         self.remain_req.write().await.clear()
+    }
+
+    async fn request_order(&self, order_req: OrderRequest) -> Result<OrderResponse, Error> {
+        let mut ret = OrderResponse::default();
+        ret.market = order_req.market.clone();
+        ret.ord_type = serde_json::to_string(&order_req.order_type).unwrap();
+        ret.side = serde_json::to_string(&order_req.side).unwrap();
+        ret.trades_count = 1;
+        ret.remaining_fee = Decimal::ZERO;
+        ret.locked = Decimal::ZERO;
+        ret.remaining_fee = Decimal::ZERO;
+        ret.remaining_volume = Decimal::ZERO;
+        match order_req.order_type {
+            OrderType::Limit => {
+                if order_req.price == Decimal::ZERO {
+                    Err(Error::InternalError("Price must not be 0".to_owned()))
+                } else if order_req.volume == Decimal::ZERO {
+                    Err(Error::InternalError("Volume must not be 0".to_owned()))
+                } else {
+                    ret.price = order_req.price;
+                    ret.avg_price = order_req.price;
+                    ret.executed_volume = order_req.volume;
+                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
+                    Ok(ret)
+                }
+            }
+            OrderType::Price => {
+                if order_req.side == OrderSide::Bid && order_req.price != Decimal::ZERO {
+                    ret.price = order_req.price;
+                    ret.avg_price = order_req.price;
+                    ret.executed_volume = order_req.volume;
+                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
+                    Ok(ret)
+                } else {
+                    Err(Error::InternalError(
+                        format!(
+                            "Invalid Request Error({})",
+                            serde_json::to_string(&order_req).unwrap()
+                        )
+                        ,
+                    ))
+                }
+            }
+            OrderType::Market => {
+                if order_req.side == OrderSide::Ask && order_req.volume != Decimal::ZERO {
+                    ret.price = order_req.price;
+                    ret.avg_price = order_req.price;
+                    ret.executed_volume = order_req.volume;
+                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
+                    Ok(ret)
+                } else {
+                    Err(Error::InternalError(
+                        format!(
+                            "Invalid Request Error({})",
+                            serde_json::to_string(&order_req).unwrap()
+                        )
+                        ,
+                    ))
+                }
+
+            }
+        }
     }
 }
 
@@ -475,7 +660,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn test_ws() {
-        let upbit_service = Arc::new(UpbitServiceSimple::new());
+        let upbit_service = Arc::new(UpbitServiceSimple::new("", ""));
         let market_ids = vec!["KRW-BTC".to_owned()];
         let s = upbit_service.ticker_stream(&market_ids).await.unwrap();
         s.for_each(|x| async move { error!("{:?}", x) }).await;

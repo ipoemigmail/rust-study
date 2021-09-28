@@ -1,6 +1,7 @@
 use format_num::NumberFormat;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
+use serde::Serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct MarketInfo {
@@ -250,4 +251,73 @@ impl RemainReq {
     pub fn new(group: &str, min: u32, max: u32) -> RemainReq {
         RemainReq { group: group.to_owned(), min, max }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub enum OrderSide {
+    #[serde(rename = "bid")]
+    Bid, // 매수
+    #[serde(rename = "ask")]
+    Ask  // 매도
+}
+
+impl Default for OrderSide {
+    fn default() -> Self {
+        OrderSide::Ask
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub enum OrderType {
+    #[serde(rename = "limit")]
+    Limit, // 지정가
+    #[serde(rename = "price")]
+    Price, // 시장가 (매수)
+    #[serde(rename = "market")]
+    Market // 시장가 (매도)
+}
+
+impl Default for OrderType {
+    fn default() -> Self {
+        OrderType::Limit
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct OrderRequest{
+    pub market: String,
+    pub side: OrderSide,
+    pub volume: Decimal,
+    pub price: Decimal,
+    pub order_type: OrderType,
+    pub identifier: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct OrderResponse {
+    pub uuid: String,
+    pub side: String,
+    #[serde(rename = "ord_type")]
+    pub ord_type: String,
+    pub price: Decimal,
+    #[serde(rename = "avg_price")]
+    pub avg_price: Decimal,
+    pub state: String,
+    pub market: String,
+    #[serde(rename = "created_at")]
+    pub created_at: String,
+    pub volume: Decimal,
+    #[serde(rename = "remaining_volume")]
+    pub remaining_volume: Decimal,
+    #[serde(rename = "reserved_fee")]
+    pub reserved_fee: Decimal,
+    #[serde(rename = "remaining_fee")]
+    pub remaining_fee: Decimal,
+    #[serde(rename = "paid_fee")]
+    pub paid_fee: Decimal,
+    pub locked: Decimal,
+    #[serde(rename = "executed_volume")]
+    pub executed_volume: Decimal,
+    #[serde(rename = "trades_count")]
+    pub trades_count: i64,
 }

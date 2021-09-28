@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use format_num::format_num;
 use itertools::*;
 use rust_decimal::prelude::*;
+use static_init::dynamic;
 use tracing::info;
 
 use std::{
@@ -121,6 +122,11 @@ fn moving_average<'a, I: Iterator<Item = &'a Candle> + Clone>(candles: I) -> f64
     sum / len
 }
 
+#[dynamic(lazy)]
+static VOLUME_FACTOR: Decimal = Decimal::from_f64(5.0).unwrap();
+#[dynamic(lazy)]
+static MIN_PRICE: Decimal = Decimal::from(1_000);
+
 #[async_trait]
 impl<U: UpbitService> BuyerService for BuyerServiceSimple<U> {
     async fn process(&self, app_state: &AppState) {
@@ -139,13 +145,15 @@ impl<U: UpbitService> BuyerService for BuyerServiceSimple<U> {
 
                         let volume_sum: Decimal = candles
                             .iter()
+                            .take(20)
                             .map(|x| Decimal::from(x.candle_acc_trade_volume))
                             .sum();
-                        let avg_volume = volume_sum / Decimal::from(candles.len());
-                        let is_abnormal_volume = Decimal::from(ticker.trade_volume)
-                            > avg_volume * Decimal::from_f64(2.0).unwrap();
+                        let avg_volume = volume_sum / Decimal::from(20);
+                        let is_abnormal_volume =
+                            Decimal::from(ticker.trade_volume) > avg_volume * *VOLUME_FACTOR;
 
-                        if is_golden_cross && is_abnormal_volume {
+                        if is_golden_cross && is_abnormal_volume && ticker.trade_price >= *MIN_PRICE {
+                        //if is_abnormal_volume {
                             info!(
                                 "{} -> moving_avg5: {}, moving_avg20: {}, avg volumne: {}, cur volume: {}",
                                 market_id, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume

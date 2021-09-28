@@ -9,13 +9,14 @@ use async_lock::RwLock;
 use chrono::prelude::*;
 use chrono::DurationRound;
 use dotenv::dotenv;
-use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::StreamExt;
 use futures::future;
+use futures::SinkExt;
+use futures::StreamExt;
 use itertools::*;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use tracing::error;
@@ -26,80 +27,6 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use upbit::*;
 
-#[derive(Clone)]
-struct AppStateWriter {
-    app_state: Arc<RwLock<AppState>>,
-    tx: futures::channel::mpsc::Sender<AppStateWriterMsg>,
-    writer: Arc<JoinHandle<()>>,
-}
-
-enum AppStateWriterMsg {
-    Write(Vec<u8>),
-    Flush,
-}
-
-impl AppStateWriter {
-    fn new(app_state: Arc<RwLock<AppState>>) -> AppStateWriter {
-        let (tx, mut rx) = futures::channel::mpsc::channel::<AppStateWriterMsg>(512);
-        let _app_state = app_state.clone();
-        let writer = tokio::spawn(async move {
-            loop {
-                match rx.next().await {
-                    Some(AppStateWriterMsg::Write(msg)) => {
-                        let mut app_state_guard = _app_state.write().await;
-                        let mut new_log_messages = app_state_guard.log_messages.as_ref().clone();
-                        new_log_messages.insert(
-                            0,
-                            std::str::from_utf8(msg.as_slice())
-                                .unwrap()
-                                .trim()
-                                .to_owned(),
-                        );
-                        app_state_guard.log_messages = Arc::new(new_log_messages);
-                    }
-                    Some(AppStateWriterMsg::Flush) => {
-                        let mut app_state_guard = _app_state.write().await;
-                        app_state_guard.log_messages = Arc::new(vec![]);
-                    }
-                    None => break,
-                }
-            }
-        });
-        AppStateWriter {
-            app_state,
-            tx,
-            writer: Arc::new(writer),
-        }
-    }
-
-    pub async fn close(&mut self) -> Result<(), futures::channel::mpsc::SendError> {
-        self.tx.close().await
-    }
-}
-
-impl std::io::Write for AppStateWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.tx
-            .try_send(AppStateWriterMsg::Write(buf.to_vec()))
-            .map(|_| buf.len())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.tx
-            .try_send(AppStateWriterMsg::Flush)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
-    }
-}
-
-impl tracing_subscriber::fmt::MakeWriter for AppStateWriter {
-    type Writer = AppStateWriter;
-
-    fn make_writer(&self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -108,6 +35,7 @@ async fn main() -> Result<()> {
     let secret_key = std::env::var("SECRET_KEY")
         .map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
 
+    let app_state_service = Arc::new(AppStateServiceSimple::new());
     //let upbit_service = Arc::new(UpbitServiceSimple::new(&access_key, &secret_key));
     let upbit_service = Arc::new(UpbitServiceDummyAccount::new_with_amount(
         &access_key,
@@ -116,16 +44,8 @@ async fn main() -> Result<()> {
     ));
     let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
 
-    let app_state = Arc::new(RwLock::new(AppState {
-        accounts: Arc::new(HashSet::from_iter(vec![Account {
-            currency: "KRW-BTC".to_owned(),
-            balance: Decimal::from(1),
-            ..Account::default()
-        }])),
-        ..AppState::new()
-    }));
     tracing_subscriber::fmt()
-        .with_writer(AppStateWriter::new(app_state.clone()))
+        .with_writer(AppStateWriter::new(app_state_service.clone()))
         .with_ansi(false)
         .init();
     //let a = upbit_service.accounts(&access_key, &secret_key).await.unwrap();
@@ -138,22 +58,23 @@ async fn main() -> Result<()> {
     let mut rx = ui::start_ui_ticker(tick_rate);
     let mut ui_state = ui::UiState::new();
 
-    let candle_updater = candle_updater(app_state.clone(), upbit_service.clone()).await;
+    let candle_updater = candle_updater(app_state_service.clone(), upbit_service.clone()).await;
 
-    let market_list_updater = market_list_updater(app_state.clone(), upbit_service.clone()).await;
+    let market_list_updater =
+        market_list_updater(app_state_service.clone(), upbit_service.clone()).await;
 
-    let account_updater = account_updater(app_state.clone(), upbit_service.clone()).await;
+    let account_updater = account_updater(app_state_service.clone(), upbit_service.clone()).await;
 
     let (ticker_updater, mut ticker_stream) =
-        ticker_updater(app_state.clone(), upbit_service.clone()).await;
+        ticker_updater(app_state_service.clone(), upbit_service.clone()).await;
 
-    let _app_state = app_state.clone();
+    let _app_state_service = app_state_service.clone();
     let buyer_handle = tokio::spawn(async move {
         loop {
             match ticker_stream.next().await {
                 Some(_) => {
-                    let __app_state = _app_state.read().await.clone();
-                    buyer_service.process(&__app_state).await;
+                    let app_state = _app_state_service.clone().state().await;
+                    buyer_service.process(&app_state).await;
                 }
                 None => (),
             }
@@ -161,12 +82,11 @@ async fn main() -> Result<()> {
     });
 
     // cli start
+    let _app_state_service = app_state_service.clone();
     loop {
-        {
-            ui_state.main_messages = Arc::new(app_state.read().await.lines());
-            ui_state.req_remains = upbit_service.remain_req().await;
-            ui_state.debug_messages = app_state.read().await.log_messages.clone();
-        }
+        ui_state.main_messages = Arc::new(_app_state_service.state().await.lines());
+        ui_state.req_remains = upbit_service.remain_req().await;
+        ui_state.debug_messages = _app_state_service.log_messages().await.clone();
         match rx.next().await {
             Some(ui::Event::UiEvent(crossterm::event::Event::Key(key_event)))
                 if key_event.code == crossterm::event::KeyCode::Char('l')
@@ -180,7 +100,7 @@ async fn main() -> Result<()> {
             }
             Some(event) => {
                 ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
-                app_state.write().await.is_shutdown = ui_state.is_shutdown;
+                app_state_service.set_shutdown(ui_state.is_shutdown).await;
                 if ui_state.is_shutdown {
                     break;
                 }
@@ -188,7 +108,7 @@ async fn main() -> Result<()> {
             None => break,
         }
     }
-    let is_shutdown = app_state.read().await.is_shutdown;
+    let is_shutdown = app_state_service.is_shutdown().await;
     candle_updater.abort();
     market_list_updater.abort();
     account_updater.abort();
@@ -198,8 +118,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn market_list_updater<U: UpbitService + 'static>(
-    app_state: Arc<RwLock<AppState>>,
+async fn market_list_updater<S: AppStateService + 'static, U: UpbitService + 'static>(
+    app_state_service: Arc<S>,
     upbit_service: Arc<U>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -211,7 +131,7 @@ async fn market_list_updater<U: UpbitService + 'static>(
                         .map(|x| x.market)
                         .filter(|x| x.starts_with("KRW"))
                         .collect();
-                    app_state.clone().write().await.market_ids = Arc::new(market_ids);
+                    app_state_service.set_market_ids(market_ids).await
                 }
                 Err(e) => {
                     error!("{}", e)
@@ -222,29 +142,32 @@ async fn market_list_updater<U: UpbitService + 'static>(
     })
 }
 
-async fn candle_updater<U: UpbitService + 'static>(
-    app_state: Arc<RwLock<AppState>>,
+async fn candle_updater<S: AppStateService + 'static, U: UpbitService + 'static>(
+    app_state_service: Arc<S>,
     upbit_service: Arc<U>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let market_ids = app_state
-                .read()
+            let market_ids = app_state_service
+                .market_ids()
                 .await
-                .market_ids
                 .iter()
                 .map(|x| x.clone())
                 .collect_vec();
 
-            for market_id in market_ids.iter() {
+            for market_id in market_ids.clone() {
                 match upbit_service
-                    .candles_minutes(MinuteUnit::_1, market_id, 200)
+                    .candles_minutes(MinuteUnit::_1, &market_id, 200)
                     .await
                 {
                     Ok(xs) => {
-                        let mut new_history = (&*app_state.read().await.history).clone();
-                        new_history.insert(market_id.to_owned(), Arc::new(xs));
-                        app_state.write().await.history = Arc::new(new_history);
+                        app_state_service
+                            .update_candles(move |v: Arc<HashMap<String, Arc<Vec<Candle>>>>| {
+                                let mut new_candles = v.as_ref().clone();
+                                new_candles.insert(market_id.to_owned(), Arc::new(xs));
+                                new_candles
+                            })
+                            .await
                     }
                     Err(e) => {
                         error!("{}", e)
@@ -269,17 +192,15 @@ async fn candle_updater<U: UpbitService + 'static>(
     })
 }
 
-async fn account_updater<U: UpbitService + 'static>(
-    app_state: Arc<RwLock<AppState>>,
+async fn account_updater<S: AppStateService + 'static, U: UpbitService + 'static>(
+    app_state_service: Arc<S>,
     upbit_service: Arc<U>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let accounts = upbit_service.accounts().await;
             match accounts {
-                Ok(xs) => {
-                    app_state.clone().write().await.accounts = Arc::new(HashSet::from_iter(xs))
-                }
+                Ok(xs) => app_state_service.set_accounts(HashSet::from_iter(xs)).await,
                 Err(e) => {
                     error!("{}", e)
                 }
@@ -288,17 +209,16 @@ async fn account_updater<U: UpbitService + 'static>(
     })
 }
 
-async fn ticker_updater<U: UpbitService + 'static>(
-    app_state: Arc<RwLock<AppState>>,
+async fn ticker_updater<S: AppStateService + 'static, U: UpbitService + 'static>(
+    app_state_service: Arc<S>,
     upbit_service: Arc<U>,
 ) -> (JoinHandle<()>, UnboundedReceiver<TickerWs>) {
     let (tx, rx) = mpsc::unbounded();
     let handle = tokio::spawn(async move {
         loop {
-            let market_ids = app_state
-                .read()
+            let market_ids = app_state_service
+                .market_ids()
                 .await
-                .market_ids
                 .iter()
                 .map(|x| x.clone())
                 .collect_vec();
@@ -313,18 +233,17 @@ async fn ticker_updater<U: UpbitService + 'static>(
                 loop {
                     match stream.next().await {
                         Some(ticker) => {
-                            {
-                                let mut app_state1 = app_state.write().await;
-                                let mut new_last_tick = app_state1.last_tick.as_ref().clone();
+                            app_state_service.update_last_tick(|v: Arc<HashMap<String, TickerWs>>| {
+                                let mut new_last_tick = v.as_ref().clone();
                                 new_last_tick.insert(ticker.code.clone(), ticker.clone());
-                                //let v = new_last_tick.keys().map(|x| x.clone()).collect::<Vec<_>>();
-                                //*DEBUG_MESSAGE.write().await = v.join(",");
-                                app_state1.last_tick = Arc::new(new_last_tick);
-                            }
-                            if *app_state.read().await.market_ids != market_ids {
+                                new_last_tick
+                            }).await;
+
+                            if *app_state_service.market_ids().await != market_ids {
                                 stream.close();
                                 break;
                             }
+
                             match tx.unbounded_send(ticker.clone()) {
                                 Ok(_) => (),
                                 Err(err) => error!("{}", err),
@@ -358,38 +277,5 @@ mod tests {
         });
         a.abort();
         println!("{:?}", a.await);
-    }
-
-    #[tokio::test]
-    async fn test_stream() {
-        let upbit_service = Arc::new(UpbitServiceSimple::new("", ""));
-
-        let app_state = Arc::new(RwLock::new(AppState {
-            accounts: Arc::new(HashSet::from_iter(vec![Account {
-                currency: "KRW-BTC".to_owned(),
-                balance: Decimal::from(1),
-                ..Account::default()
-            }])),
-            ..AppState::new()
-        }));
-
-        ticker_updater(app_state.clone(), upbit_service.clone()).await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let mut market_ids = upbit_service
-            .market_list()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|x| x.market)
-            .filter(|x| x.starts_with("KRW"))
-            .collect_vec();
-
-        app_state.write().await.market_ids = Arc::new(market_ids.clone());
-        println!("update");
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        market_ids.remove(0);
-        app_state.write().await.market_ids = Arc::new(market_ids);
-        println!("update");
-        //s.await;
     }
 }

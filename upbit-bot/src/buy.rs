@@ -27,7 +27,11 @@ impl<U: upbit::UpbitService> BuyerServiceSimple<U> {
 fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64 {
     let len = prices.clone().count() as f64;
     let sum = prices.map(|x| x.to_f64().unwrap_or(0.0)).sum::<f64>();
-    sum / len
+    if (len as isize) == 0 {
+		0.0
+	} else {
+		sum / len
+	}
 }
 
 #[async_trait]

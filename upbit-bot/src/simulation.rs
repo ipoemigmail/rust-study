@@ -75,7 +75,11 @@ fn apply_account(
         .unwrap_or(default_account);
     let amount = account.avg_buy_price * account.balance + Decimal::from(sign) * price * volume;
     account.balance = account.balance + Decimal::from(sign) * volume;
-    account.avg_buy_price = amount / account.balance;
+    account.avg_buy_price = if account.balance == Decimal::ZERO {
+		Decimal::ZERO
+	} else {
+		amount / account.balance
+	} ;
     new_accounts.insert(account.currency.clone(), account);
     new_accounts
 }

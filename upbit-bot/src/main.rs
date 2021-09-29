@@ -10,7 +10,7 @@ mod util;
 use crate::app::*;
 
 use anyhow::Result;
-use app::ToLines;
+use app::ToInfo;
 use buy::*;
 use chrono::prelude::*;
 use chrono::DurationRound;
@@ -91,9 +91,13 @@ async fn main() -> Result<()> {
     // cli start
     let _app_state_service = app_state_service.clone();
     loop {
-        ui_state.main_messages = Arc::new(_app_state_service.state().await.lines());
-        ui_state.req_remains = upbit_service.remain_req().await;
-        ui_state.debug_messages = _app_state_service.log_messages().await.clone();
+        let app_state = _app_state_service.state().await;
+        ui_state.account_info = Arc::new(app_state.account_info());
+        ui_state.candle_info = Arc::new(app_state.candle_info());
+        ui_state.state_info = Arc::new(app_state.state_info());
+        ui_state.req_remain_info = upbit_service.remain_req().await;
+        ui_state.message_info = Arc::new(app_state.message_info());
+
         match rx.next().await {
             Some(ui::Event::UiEvent(crossterm::event::Event::Key(key_event)))
                 if key_event.code == crossterm::event::KeyCode::Char('l')
@@ -101,9 +105,11 @@ async fn main() -> Result<()> {
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL)) =>
             {
-                terminal.clear()?;
-                ui_state.debug_messages = Arc::new(vec![]);
+                ui_state.message_vscroll = 0;
+                ui_state.message_hscroll = 0;
+                _app_state_service.set_log_messages(vec![]).await;
                 upbit_service.clear_remain_req().await;
+                terminal.clear()?;
             }
             Some(event) => {
                 ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
@@ -141,7 +147,7 @@ async fn market_list_updater<S: AppStateService + 'static, U: UpbitService + 'st
                     app_state_service.set_market_ids(market_ids).await
                 }
                 Err(e) => {
-                    error!("{}", e)
+                    error!("{} ({}:{})", e, file!(), line!())
                 }
             }
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -177,7 +183,7 @@ async fn candle_updater<S: AppStateService + 'static, U: UpbitService + 'static>
                             .await
                     }
                     Err(e) => {
-                        error!("{}", e)
+                        error!("{} ({}:{})", e, file!(), line!())
                     }
                 }
             }
@@ -215,7 +221,7 @@ async fn account_updater<S: AppStateService + 'static, U: UpbitService + 'static
                         .await
                 }
                 Err(e) => {
-                    error!("{}", e)
+                    error!("{} ({}:{})", e, file!(), line!())
                 }
             }
         }
@@ -261,7 +267,7 @@ async fn ticker_updater<S: AppStateService + 'static, U: UpbitService + 'static>
 
                             match tx.unbounded_send(ticker.clone()) {
                                 Ok(_) => (),
-                                Err(err) => error!("{}", err),
+                                Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                             }
                         }
                         None => {

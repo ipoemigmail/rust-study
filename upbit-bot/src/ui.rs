@@ -21,11 +21,15 @@ use tui::{
 pub struct UiState {
     pub is_shutdown: bool,
     pub input_mode: InputMode,
-    pub scroll: i32,
-    pub height: i32,
-    pub main_messages: Arc<Vec<String>>,
-    pub req_remains: Arc<HashMap<String, (u32, u32)>>,
-    pub debug_messages: Arc<Vec<String>>,
+    pub message_vscroll: i32,
+    pub message_hscroll: i32,
+    pub message_height: i32,
+    pub message_width: i32,
+    pub account_info: Arc<Vec<String>>,
+    pub state_info: Arc<Vec<String>>,
+    pub candle_info: Arc<Vec<String>>,
+    pub req_remain_info: Arc<HashMap<String, (u32, u32)>>,
+    pub message_info: Arc<Vec<String>>,
 }
 
 impl UiState {
@@ -33,11 +37,15 @@ impl UiState {
         UiState {
             is_shutdown: false,
             input_mode: InputMode::Normal,
-            scroll: 0,
-            height: 0,
-            main_messages: Arc::new(vec![]),
-            req_remains: Arc::new(HashMap::new()),
-            debug_messages: Arc::new(vec![]),
+            message_vscroll: 0,
+            message_hscroll: 0,
+            message_height: 0,
+            message_width: 0,
+            account_info: Arc::new(vec![]),
+            state_info: Arc::new(vec![]),
+            candle_info: Arc::new(vec![]),
+            req_remain_info: Arc::new(HashMap::new()),
+            message_info: Arc::new(vec![]),
         }
     }
 }
@@ -75,7 +83,7 @@ pub fn start_ui_ticker(tick_rate: Duration) -> Receiver<Event> {
                     }
                     Ok(_) => (),
                     Err(e) => {
-                        error!("{}:{} - {}", file!(), line!(), e);
+                        error!("{} ({}:{})", file!(), line!(), e);
                     }
                 }
             }
@@ -83,7 +91,7 @@ pub fn start_ui_ticker(tick_rate: Duration) -> Receiver<Event> {
                 match tx.send(Event::Tick).await {
                     Ok(_) => (),
                     Err(e) => {
-                        error!("{}", e);
+                        error!("{} ({}:{})", e, file!(), line!());
                         break;
                     }
                 }
@@ -130,18 +138,6 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
     let mut new_ui_state = ui_state.clone();
     terminal.draw(|f| {
         let main_layout = layout::Layout::default()
-            .direction(layout::Direction::Vertical)
-            .constraints(
-                [
-                    layout::Constraint::Percentage(60),
-                    layout::Constraint::Percentage(30),
-                    layout::Constraint::Length(1),
-                ]
-                .as_ref(),
-            )
-            .split(f.size());
-
-        let console_layout = layout::Layout::default()
             .direction(layout::Direction::Horizontal)
             .constraints(
                 [
@@ -150,55 +146,90 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
                 ]
                 .as_ref(),
             )
+            .split(f.size());
+
+        let left_layout = layout::Layout::default()
+            .direction(layout::Direction::Vertical)
+            .constraints(
+                [
+                    layout::Constraint::Percentage(50),
+                    layout::Constraint::Percentage(50),
+                ]
+                .as_ref(),
+            )
             .split(main_layout[0]);
 
-        new_ui_state.height = console_layout[0].height as i32;
+        let right_layout = layout::Layout::default()
+            .direction(layout::Direction::Vertical)
+            .constraints(
+                [
+                    layout::Constraint::Percentage(40),
+                    layout::Constraint::Percentage(30),
+                    layout::Constraint::Percentage(30),
+                ]
+                .as_ref(),
+            )
+            .split(main_layout[1]);
+
         let border_size = 2;
-        new_ui_state.height -= border_size;
+        new_ui_state.message_height = main_layout[0].height as i32 - border_size;
+        new_ui_state.message_width = main_layout[0].width as i32 - border_size;
 
-        let console_block = widgets::Block::default()
-            .title("──< UpBit Console >──")
+        let account_block = widgets::Block::default()
+            .title("──< Account >──")
             .borders(widgets::Borders::ALL);
-        let console_paragraph = widgets::Paragraph::new(ui_state.main_messages.join("\n"))
-            .block(console_block)
-            .alignment(layout::Alignment::Left)
-            .scroll((ui_state.scroll as u16, 0));
-        f.render_widget(console_paragraph, console_layout[0]);
-
-        let debug_block = widgets::Block::default()
-            .title("──< Debug >──")
-            .borders(widgets::Borders::ALL);
-        let debug_paragraph = widgets::Paragraph::new(ui_state.debug_messages.join("\n"))
-            .block(debug_block)
+        let account_paragraph = widgets::Paragraph::new(ui_state.account_info.join("\n"))
+            .block(account_block)
             .alignment(layout::Alignment::Left)
             .wrap(widgets::Wrap { trim: true });
-        f.render_widget(debug_paragraph, main_layout[1]);
+        f.render_widget(account_paragraph, left_layout[0]);
 
-        let input_block = widgets::Block::default()
-            .title("──< Input >──")
+        let state_block = widgets::Block::default()
+            .title("──< State >──")
             .borders(widgets::Borders::ALL);
-        let input_paragraph = widgets::Paragraph::new(vec![""].join("\n"))
-            .block(input_block)
+        let state_paragraph = widgets::Paragraph::new(ui_state.state_info.join("\n"))
+            .block(state_block)
             .alignment(layout::Alignment::Left)
             .wrap(widgets::Wrap { trim: true });
-        f.render_widget(input_paragraph, main_layout[2]);
+        f.render_widget(state_paragraph, right_layout[0]);
 
-        let mut req_remains = ui_state
-            .req_remains
+        let candle_block = widgets::Block::default()
+            .title("──< Candle >──")
+            .borders(widgets::Borders::ALL);
+        let candle_paragraph = widgets::Paragraph::new(ui_state.candle_info.join("\n"))
+            .block(candle_block)
+            .alignment(layout::Alignment::Left)
+            .wrap(widgets::Wrap { trim: true });
+        f.render_widget(candle_paragraph, right_layout[1]);
+
+        let message_block = widgets::Block::default()
+            .title("──< Message >──")
+            .borders(widgets::Borders::ALL);
+        let message_paragraph = widgets::Paragraph::new(ui_state.message_info.join("\n"))
+            .block(message_block)
+            .alignment(layout::Alignment::Left)
+            .scroll((
+                ui_state.message_vscroll as u16,
+                ui_state.message_hscroll as u16,
+            ))
+            .wrap(widgets::Wrap { trim: true });
+        f.render_widget(message_paragraph, left_layout[1]);
+
+        let req_remain_block = widgets::Block::default()
+            .title("──< Req-Remain >──")
+            .borders(widgets::Borders::ALL);
+        let req_remain_text = ui_state
+            .req_remain_info
             .clone()
             .iter()
             .map(|(group, (min, sec))| format!("{} -> min: {}, sec: {}", group, min, sec))
-            .collect_vec();
-        req_remains.sort();
-
-        let req_block = widgets::Block::default()
-            .title("──< Req-Remain >──")
-            .borders(widgets::Borders::ALL);
-        let req_paragraph = widgets::Paragraph::new(req_remains.join("\n"))
-            .block(req_block)
+            .collect_vec()
+            .join("\n");
+        let req_remain_paragraph = widgets::Paragraph::new(req_remain_text)
+            .block(req_remain_block)
             .alignment(layout::Alignment::Left)
             .wrap(widgets::Wrap { trim: true });
-        f.render_widget(req_paragraph, console_layout[1]);
+        f.render_widget(req_remain_paragraph, right_layout[2]);
     })?;
     Ok(new_ui_state)
 }
@@ -219,7 +250,7 @@ pub async fn handle_input(
                 event::KeyCode::Char('q') => {
                     rollback_ui(terminal)?;
                     ui_state
-                        .req_remains
+                        .req_remain_info
                         .iter()
                         .for_each(|x| println!("{}, {}, {}", x.0, x.1 .0, x.1 .1));
                     ui_state.is_shutdown = true;
@@ -232,16 +263,29 @@ pub async fn handle_input(
                     ui_state.is_shutdown = true;
                     Ok(ui_state)
                 }
+                event::KeyCode::Char('h') => {
+                    ui_state.message_hscroll -= 1;
+                    ui_state.message_hscroll = ui_state.message_hscroll.max(0);
+                    Ok(ui_state)
+                }
+                event::KeyCode::Char('l') => {
+                    ui_state.message_hscroll += 1;
+                    ui_state.message_hscroll = ui_state
+                        .message_hscroll
+                        .min(ui_state.message_info.len() as i32 - ui_state.message_width)
+                        .max(0);
+                    Ok(ui_state)
+                }
                 event::KeyCode::Char('k') => {
-                    ui_state.scroll -= 1;
-                    ui_state.scroll = ui_state.scroll.max(0);
+                    ui_state.message_vscroll -= 1;
+                    ui_state.message_vscroll = ui_state.message_vscroll.max(0);
                     Ok(ui_state)
                 }
                 event::KeyCode::Char('j') => {
-                    ui_state.scroll += 1;
-                    ui_state.scroll = ui_state
-                        .scroll
-                        .min(ui_state.main_messages.len() as i32 - ui_state.height)
+                    ui_state.message_vscroll += 1;
+                    ui_state.message_vscroll = ui_state
+                        .message_vscroll
+                        .min(ui_state.message_info.len() as i32 - ui_state.message_height)
                         .max(0);
                     Ok(ui_state)
                 }

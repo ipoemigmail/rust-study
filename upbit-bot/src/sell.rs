@@ -68,7 +68,7 @@ impl<U: upbit::UpbitService> SellerService for SellerServiceSimple<U> {
 
                                 match ret {
                                     Ok(_) => (),
-                                    Err(err) => error!("{}", err),
+                                    Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                                 }
                             }
                         }

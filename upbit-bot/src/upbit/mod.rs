@@ -239,15 +239,18 @@ async fn ticker_stream(
                         Ok(ticker) => match tx.unbounded_send(ticker) {
                             Ok(_) => (),
                             Err(e) => {
-                                error!("{}", e);
-                                break;
+                                if tx.is_closed() {
+                                    break;
+                                } else {
+                                    error!("{} ({}:{})", e, file!(), line!());
+                                }
                             }
                         },
-                        Err(e) => error!("{}", e),
+                        Err(e) => error!("{} ({}:{})", e, file!(), line!()),
                     }
                 }
                 Err(e) => {
-                    error!("{}", e);
+                    error!("{} ({}:{})", e, file!(), line!());
                     break;
                 }
             }

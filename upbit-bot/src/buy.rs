@@ -28,10 +28,10 @@ fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64
     let len = prices.clone().count() as f64;
     let sum = prices.map(|x| x.to_f64().unwrap_or(0.0)).sum::<f64>();
     if (len as isize) == 0 {
-		0.0
-	} else {
-		sum / len
-	}
+        0.0
+    } else {
+        sum / len
+    }
 }
 
 #[async_trait]
@@ -68,8 +68,8 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
 
                             if is_golden_cross
                                 && is_abnormal_volume
-                                && ticker.trade_price >= *MIN_PRICE
-                            {
+                                && ticker.trade_price >= *MIN_PRICE {
+                            //if is_abnormal_volume {
                                 info!(
 									"buy {} -> moving_avg5: {}, moving_avg20: {}, avg volumne: {}, cur volume: {}",
 									market_id, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
@@ -86,7 +86,7 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
 
                                 match ret {
                                     Ok(_) => (),
-                                    Err(err) => error!("{}", err),
+                                    Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                                 }
                             }
                         }

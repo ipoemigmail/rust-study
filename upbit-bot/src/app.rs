@@ -18,8 +18,11 @@ lazy_static! {
     pub static ref FEE_FACTOR: Decimal = Decimal::from_f64(0.0002).unwrap();
 }
 
-pub trait ToLines {
-    fn lines(&self) -> Vec<String>;
+pub trait ToInfo {
+    fn account_info(&self) -> Vec<String>;
+    fn candle_info(&self) -> Vec<String>;
+    fn state_info(&self) -> Vec<String>;
+    fn message_info(&self) -> Vec<String>;
 }
 
 #[derive(Debug, Clone)]
@@ -45,10 +48,9 @@ impl AppState {
     }
 }
 
-impl ToLines for AppState {
-    fn lines(&self) -> Vec<String> {
-        let mut accounts_result = self
-            .accounts
+impl ToInfo for AppState {
+    fn account_info(&self) -> Vec<String> {
+        self.accounts
             .iter()
             .map(|(_, a)| {
                 let v = self
@@ -88,12 +90,13 @@ impl ToLines for AppState {
                     None => "".to_owned(),
                 }
             })
-            .collect_vec();
-        accounts_result.sort();
+            .sorted()
+            .collect_vec()
+    }
 
-        let mut history_result = (*self.candles)
-            .clone()
-            .into_iter()
+    fn candle_info(&self) -> Vec<String> {
+        self.candles
+            .iter()
             .map(|x| {
                 let v = x.1.first().unwrap();
                 (v.candle_date_time_kst.clone(), v.market.clone())
@@ -115,18 +118,20 @@ impl ToLines for AppState {
                     format!("{} -> {}", x, xs.len())
                 }
             })
-            .collect_vec();
+            .sorted()
+            .collect_vec()
+    }
 
-        let mut result = vec![format!(
-            "market count: {}, history count: {}, last_tick count: {}",
-            self.market_ids.iter().count(),
-            self.candles.iter().count(),
-            self.last_tick.iter().count(),
-        )];
-        history_result.sort();
-        result.extend(history_result);
-        result.extend(accounts_result);
-        result
+    fn state_info(&self) -> Vec<String> {
+        vec![
+            format!("market count: {}", self.market_ids.len()),
+            format!("candle count: {}", self.candles.len()),
+            format!("last_tick count: {}", self.last_tick.len()),
+        ]
+    }
+
+    fn message_info(&self) -> Vec<String> {
+        self.log_messages.as_ref().clone()
     }
 }
 
@@ -248,7 +253,7 @@ impl AppStateService for AppStateServiceSimple {
     }
 
     async fn set_log_messages(&self, log_messages: Vec<String>) {
-        self.app_state.write().await.market_ids = Arc::new(log_messages);
+        self.app_state.write().await.log_messages = Arc::new(log_messages);
     }
 
     async fn update_log_messages<F: SendArcF<Vec<String>>>(&self, f: F) {
@@ -329,13 +334,6 @@ impl<S: AppStateService + Clone> tracing_subscriber::fmt::MakeWriter for AppStat
     type Writer = AppStateWriter<S>;
 
     fn make_writer(&self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-#[async_trait]
-impl ToLines for Vec<String> {
-    fn lines(&self) -> Vec<String> {
         self.clone()
     }
 }

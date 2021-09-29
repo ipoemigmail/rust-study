@@ -13,7 +13,7 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha512};
-use static_init::dynamic;
+
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::{fmt::Display, sync::Arc, time::Duration};
@@ -62,7 +62,7 @@ impl Display for MinuteUnit {
     }
 }
 
-fn get_unit_price(cur_price: Decimal) -> Decimal {
+pub fn get_unit_price(cur_price: Decimal) -> Decimal {
     if cur_price >= Decimal::from(2_000_000) {
         Decimal::from(1_000)
     } else if cur_price >= Decimal::from(1_000_000) && cur_price < Decimal::from(2_000_000) {
@@ -434,215 +434,7 @@ impl UpbitService for UpbitServiceSimple {
     }
 }
 
-pub struct UpbitServiceDummyAccount {
-    client: reqwest::Client,
-    access_key: String,
-    secret_key: String,
-    accounts: Arc<Vec<Account>>,
-    default_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    market_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    candle_rate_limiters: Arc<Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
-    pub remain_req: RwLock<HashMap<String, (u32, u32)>>,
-}
-
-impl UpbitServiceDummyAccount {
-    pub fn new(access_key: &str, secret_key: &str) -> UpbitServiceDummyAccount {
-        UpbitServiceDummyAccount {
-            client: reqwest::ClientBuilder::new()
-                .connect_timeout(Duration::from_secs(1))
-                .build()
-                .unwrap(),
-            access_key: access_key.to_owned(),
-            secret_key: secret_key.to_owned(),
-            accounts: Arc::new(vec![]),
-            default_rate_limiters: Arc::new(create_limiter(safe_limit(30), safe_limit(500))),
-            market_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
-            candle_rate_limiters: Arc::new(create_limiter(safe_limit(10), safe_limit(600))),
-            remain_req: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub fn new_with_amount(
-        access_key: &str,
-        secret_key: &str,
-        amount: i32,
-    ) -> UpbitServiceDummyAccount {
-        let mut n = Self::new(access_key, secret_key);
-        let mut account = Account::default();
-        account.currency = "KRW".to_owned();
-        account.balance = Decimal::from_i32(amount).unwrap();
-        account.avg_buy_price = Decimal::ZERO;
-        account.avg_buy_price_modified = true;
-        account.unit_currency = "KRW".to_owned();
-        n.accounts = Arc::new(vec![account]);
-        n
-    }
-}
-
-#[dynamic(lazy)]
-static FEE_FACTOR: Decimal = Decimal::from_f64(0.02).unwrap();
-
-#[async_trait]
-impl UpbitService for UpbitServiceDummyAccount {
-    async fn market_list(&self) -> Result<Vec<MarketInfo>, Error> {
-        for limiter in self.market_rate_limiters.iter() {
-            limiter.until_ready().await;
-        }
-        let url = format!("{}/market/all?isDetails=true", BASE_URL);
-        match call_get_request(&self.client, &url, None).await {
-            Ok((market_info, remain_req)) => {
-                self.remain_req
-                    .write()
-                    .await
-                    .insert(remain_req.group, (remain_req.min, remain_req.max));
-                Ok(market_info)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn market_ticker_list(&self, market_ids: Vec<String>) -> Result<Vec<Ticker>, Error> {
-        for limiter in self.market_rate_limiters.iter() {
-            limiter.until_ready().await;
-        }
-        let url = format!("{}/ticker?markets={}", BASE_URL, market_ids.join(","));
-        match call_get_request(&self.client, &url, None).await {
-            Ok((market_info, remain_req)) => {
-                self.remain_req
-                    .write()
-                    .await
-                    .insert(remain_req.group, (remain_req.min, remain_req.max));
-                Ok(market_info)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn candles_minutes(
-        &self,
-        unit: MinuteUnit,
-        market_id: &str,
-        count: u8,
-    ) -> Result<Vec<Candle>, Error> {
-        for limiter in self.candle_rate_limiters.iter() {
-            limiter.until_ready().await;
-        }
-        let url = format!(
-            "{}/candles/minutes/{}?market={}&count={}",
-            BASE_URL, unit, market_id, count
-        );
-        match call_get_request(&self.client, &url, None).await {
-            Ok((market_info, remain_req)) => {
-                self.remain_req
-                    .write()
-                    .await
-                    .insert(remain_req.group, (remain_req.min, remain_req.max));
-                Ok(market_info)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn accounts(&self) -> Result<Vec<Account>, Error> {
-        for limiter in self.default_rate_limiters.iter() {
-            limiter.until_ready().await;
-        }
-        Ok((*self.accounts).clone())
-    }
-
-    async fn orders_chance(&self, market_id: &str) -> Result<OrderChance, Error> {
-        for limiter in self.default_rate_limiters.iter() {
-            limiter.until_ready().await;
-        }
-        let result = OrderChance {
-            market: OrderMarket {
-                id: market_id.to_owned(),
-                ..OrderMarket::default()
-            },
-            ..OrderChance::default()
-        };
-        Ok(result)
-    }
-
-    async fn ticker_stream(
-        &self,
-        market_ids: &Vec<String>,
-    ) -> Result<futures::channel::mpsc::UnboundedReceiver<TickerWs>, Error> {
-        ticker_stream(market_ids).await
-    }
-
-    async fn remain_req(&self) -> Arc<HashMap<String, (u32, u32)>> {
-        Arc::new(self.remain_req.read().await.clone())
-    }
-
-    async fn clear_remain_req(&self) {
-        self.remain_req.write().await.clear()
-    }
-
-    async fn request_order(&self, order_req: OrderRequest) -> Result<OrderResponse, Error> {
-        let mut ret = OrderResponse::default();
-        ret.market = order_req.market.clone();
-        ret.ord_type = serde_json::to_string(&order_req.order_type).unwrap();
-        ret.side = serde_json::to_string(&order_req.side).unwrap();
-        ret.trades_count = 1;
-        ret.remaining_fee = Decimal::ZERO;
-        ret.locked = Decimal::ZERO;
-        ret.remaining_fee = Decimal::ZERO;
-        ret.remaining_volume = Decimal::ZERO;
-        match order_req.order_type {
-            OrderType::Limit => {
-                if order_req.price == Decimal::ZERO {
-                    Err(Error::InternalError("Price must not be 0".to_owned()))
-                } else if order_req.volume == Decimal::ZERO {
-                    Err(Error::InternalError("Volume must not be 0".to_owned()))
-                } else {
-                    ret.price = order_req.price;
-                    ret.avg_price = order_req.price;
-                    ret.executed_volume = order_req.volume;
-                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
-                    Ok(ret)
-                }
-            }
-            OrderType::Price => {
-                if order_req.side == OrderSide::Bid && order_req.price != Decimal::ZERO {
-                    ret.price = order_req.price;
-                    ret.avg_price = order_req.price;
-                    ret.executed_volume = order_req.volume;
-                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
-                    Ok(ret)
-                } else {
-                    Err(Error::InternalError(
-                        format!(
-                            "Invalid Request Error({})",
-                            serde_json::to_string(&order_req).unwrap()
-                        )
-                        ,
-                    ))
-                }
-            }
-            OrderType::Market => {
-                if order_req.side == OrderSide::Ask && order_req.volume != Decimal::ZERO {
-                    ret.price = order_req.price;
-                    ret.avg_price = order_req.price;
-                    ret.executed_volume = order_req.volume;
-                    ret.paid_fee = order_req.price * order_req.volume * *FEE_FACTOR;
-                    Ok(ret)
-                } else {
-                    Err(Error::InternalError(
-                        format!(
-                            "Invalid Request Error({})",
-                            serde_json::to_string(&order_req).unwrap()
-                        )
-                        ,
-                    ))
-                }
-
-            }
-        }
-    }
-}
-
-fn create_limiter(
+pub fn create_limiter(
     per_second: u32,
     per_minute: u32,
 ) -> Vec<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {

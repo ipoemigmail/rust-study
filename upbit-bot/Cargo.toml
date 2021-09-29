@@ -20,7 +20,7 @@ anyhow = "1"
 thiserror = "1"
 dotenv = "0.15"
 chrono = "0.4" # datetime
-static_init = "1" # static heap
+lazy_static = "1.4.0" # static heap
 governor = "0.3" # limiter
 crossterm = "0.20" # terminal ui
 tui = { version = "0.16", default-features = false, features = ['crossterm'] } # terminal ui

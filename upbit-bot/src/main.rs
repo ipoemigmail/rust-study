@@ -1,30 +1,32 @@
 //#![deny(warnings)]
-mod domain;
+mod app;
+mod buy;
+mod sell;
+mod simulation;
 mod ui;
 mod upbit;
+mod util;
 
-use crate::domain::*;
+use crate::app::*;
+
 use anyhow::Result;
-use async_lock::RwLock;
+use app::ToLines;
+use buy::*;
 use chrono::prelude::*;
 use chrono::DurationRound;
 use dotenv::dotenv;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::future;
-use futures::SinkExt;
 use futures::StreamExt;
 use itertools::*;
-use rust_decimal::Decimal;
+use sell::*;
+use simulation::*;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::iter::FromIterator;
-use tracing::error;
-
-use domain::ToLines;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tracing::error;
 use upbit::*;
 
 #[tokio::main]
@@ -36,13 +38,17 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
 
     let app_state_service = Arc::new(AppStateServiceSimple::new());
-    //let upbit_service = Arc::new(UpbitServiceSimple::new(&access_key, &secret_key));
-    let upbit_service = Arc::new(UpbitServiceDummyAccount::new_with_amount(
-        &access_key,
-        &secret_key,
-        1_000_000,
-    ));
+    let upbit_service = Arc::new(UpbitServiceSimple::new(&access_key, &secret_key));
+    let upbit_service = Arc::new(
+        UpbitServiceDummyAccount::new_with_amount(
+            1_000_000,
+            upbit_service,
+            app_state_service.clone(),
+        )
+        .await,
+    );
     let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
+    let seller_service = Arc::new(SellerServiceSimple::new(upbit_service.clone()));
 
     tracing_subscriber::fmt()
         .with_writer(AppStateWriter::new(app_state_service.clone()))
@@ -74,6 +80,7 @@ async fn main() -> Result<()> {
             match ticker_stream.next().await {
                 Some(_) => {
                     let app_state = _app_state_service.clone().state().await;
+                    seller_service.process(&app_state).await;
                     buyer_service.process(&app_state).await;
                 }
                 None => (),
@@ -200,7 +207,13 @@ async fn account_updater<S: AppStateService + 'static, U: UpbitService + 'static
         loop {
             let accounts = upbit_service.accounts().await;
             match accounts {
-                Ok(xs) => app_state_service.set_accounts(HashSet::from_iter(xs)).await,
+                Ok(xs) => {
+                    app_state_service
+                        .set_accounts(HashMap::from_iter(
+                            xs.into_iter().map(|x| (x.currency.clone(), x)),
+                        ))
+                        .await
+                }
                 Err(e) => {
                     error!("{}", e)
                 }
@@ -233,11 +246,13 @@ async fn ticker_updater<S: AppStateService + 'static, U: UpbitService + 'static>
                 loop {
                     match stream.next().await {
                         Some(ticker) => {
-                            app_state_service.update_last_tick(|v: Arc<HashMap<String, TickerWs>>| {
-                                let mut new_last_tick = v.as_ref().clone();
-                                new_last_tick.insert(ticker.code.clone(), ticker.clone());
-                                new_last_tick
-                            }).await;
+                            app_state_service
+                                .update_last_tick(|v: Arc<HashMap<String, TickerWs>>| {
+                                    let mut new_last_tick = v.as_ref().clone();
+                                    new_last_tick.insert(ticker.code.clone(), ticker.clone());
+                                    new_last_tick
+                                })
+                                .await;
 
                             if *app_state_service.market_ids().await != market_ids {
                                 stream.close();

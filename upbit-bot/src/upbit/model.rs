@@ -1,7 +1,6 @@
 use format_num::NumberFormat;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
-use serde::Serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct MarketInfo {
@@ -249,7 +248,11 @@ pub struct RemainReq {
 
 impl RemainReq {
     pub fn new(group: &str, min: u32, max: u32) -> RemainReq {
-        RemainReq { group: group.to_owned(), min, max }
+        RemainReq {
+            group: group.to_owned(),
+            min,
+            max,
+        }
     }
 }
 
@@ -258,7 +261,7 @@ pub enum OrderSide {
     #[serde(rename = "bid")]
     Bid, // 매수
     #[serde(rename = "ask")]
-    Ask  // 매도
+    Ask, // 매도
 }
 
 impl Default for OrderSide {
@@ -274,7 +277,7 @@ pub enum OrderType {
     #[serde(rename = "price")]
     Price, // 시장가 (매수)
     #[serde(rename = "market")]
-    Market // 시장가 (매도)
+    Market, // 시장가 (매도)
 }
 
 impl Default for OrderType {
@@ -284,13 +287,33 @@ impl Default for OrderType {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
-pub struct OrderRequest{
+pub struct OrderRequest {
     pub market: String,
     pub side: OrderSide,
     pub volume: Decimal,
     pub price: Decimal,
     pub order_type: OrderType,
     pub identifier: Option<String>,
+}
+
+impl OrderRequest {
+    pub fn new(
+        market: String,
+        side: OrderSide,
+        volume: Decimal,
+        price: Decimal,
+        order_type: OrderType,
+        identifier: Option<String>,
+    ) -> OrderRequest {
+        OrderRequest {
+            market,
+            side,
+            volume,
+            price,
+            order_type,
+            identifier,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]

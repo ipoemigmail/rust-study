@@ -117,13 +117,13 @@ async fn main() -> Result<()> {
             //{
             //    info!("ttttttttttttttttttttt     tttttttttttttttttttt fjdskafjkdlsajkljfaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa t test!");
             //}
-            //Some(event) => {
-            //    ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
-            //    app_state_service.set_shutdown(ui_state.is_shutdown).await;
-            //    if ui_state.is_shutdown {
-            //        break;
-            //    }
-            //}
+            Some(event) => {
+                ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
+                app_state_service.set_shutdown(ui_state.is_shutdown).await;
+                if ui_state.is_shutdown {
+                    break;
+                }
+            }
             None => break,
         }
     }

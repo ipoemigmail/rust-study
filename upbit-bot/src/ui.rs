@@ -263,12 +263,12 @@ pub async fn handle_input(
                     Ok(ui_state)
                 }
                 event::KeyCode::Char('h') => {
-                    ui_state.message_hscroll -= 1;
+                    ui_state.message_hscroll -= 2;
                     ui_state.message_hscroll = ui_state.message_hscroll.max(0);
                     Ok(ui_state)
                 }
                 event::KeyCode::Char('l') => {
-                    ui_state.message_hscroll += 1;
+                    ui_state.message_hscroll += 2;
                     let message_info_width = ui_state
                         .message_info
                         .iter()

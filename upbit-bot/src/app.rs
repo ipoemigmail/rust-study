@@ -131,7 +131,11 @@ impl ToInfo for AppState {
     }
 
     fn message_info(&self) -> Vec<String> {
-        self.log_messages.as_ref().clone()
+        self.log_messages
+            .iter()
+            .enumerate()
+            .map(|(i, x)| format!("[{}] {}", i, x))
+            .collect_vec()
     }
 }
 

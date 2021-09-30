@@ -172,8 +172,8 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
             .split(main_layout[1]);
 
         let border_size = 2;
-        new_ui_state.message_height = main_layout[0].height as i32 - border_size;
-        new_ui_state.message_width = main_layout[0].width as i32 - border_size;
+        new_ui_state.message_height = left_layout[1].height as i32 - border_size;
+        new_ui_state.message_width = left_layout[1].width as i32 - border_size;
 
         let account_block = widgets::Block::default()
             .title("──< Account >──")
@@ -211,8 +211,7 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
             .scroll((
                 ui_state.message_vscroll as u16,
                 ui_state.message_hscroll as u16,
-            ))
-            .wrap(widgets::Wrap { trim: true });
+            ));
         f.render_widget(message_paragraph, left_layout[1]);
 
         let req_remain_block = widgets::Block::default()
@@ -270,9 +269,15 @@ pub async fn handle_input(
                 }
                 event::KeyCode::Char('l') => {
                     ui_state.message_hscroll += 1;
+                    let message_info_width = ui_state
+                        .message_info
+                        .iter()
+                        .map(|x| x.len())
+                        .max()
+                        .unwrap_or(0);
                     ui_state.message_hscroll = ui_state
                         .message_hscroll
-                        .min(ui_state.message_info.len() as i32 - ui_state.message_width)
+                        .min(message_info_width as i32 - ui_state.message_width)
                         .max(0);
                     Ok(ui_state)
                 }

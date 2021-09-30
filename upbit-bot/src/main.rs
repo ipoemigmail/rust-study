@@ -21,6 +21,7 @@ use futures::StreamExt;
 use itertools::*;
 use sell::*;
 use simulation::*;
+use tracing::info;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::sync::Arc;
@@ -111,13 +112,18 @@ async fn main() -> Result<()> {
                 upbit_service.clear_remain_req().await;
                 terminal.clear()?;
             }
-            Some(event) => {
-                ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
-                app_state_service.set_shutdown(ui_state.is_shutdown).await;
-                if ui_state.is_shutdown {
-                    break;
-                }
-            }
+            //Some(ui::Event::UiEvent(crossterm::event::Event::Key(key_event)))
+            //    if key_event.code == crossterm::event::KeyCode::Char('t') =>
+            //{
+            //    info!("ttttttttttttttttttttt     tttttttttttttttttttt fjdskafjkdlsajkljfaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa t test!");
+            //}
+            //Some(event) => {
+            //    ui_state = ui::handle_input(ui_state, event, &mut terminal).await?;
+            //    app_state_service.set_shutdown(ui_state.is_shutdown).await;
+            //    if ui_state.is_shutdown {
+            //        break;
+            //    }
+            //}
             None => break,
         }
     }

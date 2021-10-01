@@ -1,4 +1,5 @@
 use crate::app::*;
+use crate::noti;
 use crate::upbit;
 use crate::util::retry;
 
@@ -14,13 +15,17 @@ pub trait BuyerService: Send + Sync {
     async fn process(&self, app_state: &AppState);
 }
 
-pub struct BuyerServiceSimple<U: upbit::UpbitService> {
+pub struct BuyerServiceSimple<U: upbit::UpbitService, N: noti::NotiSender> {
     upbit_service: Arc<U>,
+    noti_sender: Arc<N>,
 }
 
-impl<U: upbit::UpbitService> BuyerServiceSimple<U> {
-    pub fn new(upbit_service: Arc<U>) -> BuyerServiceSimple<U> {
-        BuyerServiceSimple { upbit_service }
+impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerServiceSimple<U, N> {
+    pub fn new(upbit_service: Arc<U>, noti_sender: Arc<N>) -> BuyerServiceSimple<U, N> {
+        BuyerServiceSimple {
+            upbit_service,
+            noti_sender,
+        }
     }
 }
 
@@ -35,7 +40,7 @@ fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64
 }
 
 #[async_trait]
-impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
+impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerService for BuyerServiceSimple<U, N> {
     async fn process(&self, app_state: &AppState) {
         if app_state
             .accounts
@@ -80,7 +85,7 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
                                 && ticker.trade_price >= *MIN_PRICE
                             {
                                 //if is_abnormal_volume {
-                                info!(
+                                let msg = format!(
                                     "buy {} ({}) -> moving_avg5: {}, moving_avg20: {}",
                                     //market_id, ticker.trade_price, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
                                     market_id,
@@ -88,6 +93,7 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
                                     moving_avg5,
                                     moving_avg20
                                 );
+                                info!("{}", msg);
                                 let ret = retry(1, Duration::from_millis(10), || async {
                                     let mut req = upbit::OrderRequest::default();
                                     req.market = market_id.clone();
@@ -99,7 +105,10 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
                                 .await;
 
                                 match ret {
-                                    Ok(_) => (),
+                                    Ok(_) => {
+                                        let now = chrono::Local::now();
+                                        self.noti_sender.send_msg(&format!("[{}] {}", now.to_rfc3339(), msg)).await.unwrap_or(())
+                                    }
                                     Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                                 }
                             }

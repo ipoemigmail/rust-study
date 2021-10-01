@@ -1,6 +1,7 @@
 //#![deny(warnings)]
 mod app;
 mod buy;
+mod noti;
 mod sell;
 mod simulation;
 mod ui;
@@ -8,6 +9,7 @@ mod upbit;
 mod util;
 
 use crate::app::*;
+use crate::noti::NotiSenderTelegram;
 
 use anyhow::Result;
 use app::ToInfo;
@@ -30,15 +32,25 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::error;
 use upbit::*;
-use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    run().await
+}
+
+async fn run() -> Result<()> {
     dotenv().ok();
     let access_key = std::env::var("ACCESS_KEY")
-        .map_err(|_| anyhow::format_err!("ACCESS_KEY was not found in environment var"))?;
+        .map_err(|_| anyhow::format_err!("Not Found ACCESS_KEY in environment var"))?;
     let secret_key = std::env::var("SECRET_KEY")
-        .map_err(|_| anyhow::format_err!("SECRET_KEY was not found in environment var"))?;
+        .map_err(|_| anyhow::format_err!("Not Found SECRET_KEY in environment var"))?;
+    let telegram_token = std::env::var("TELEGRAM_TOKEN")
+        .map_err(|_| anyhow::format_err!("Not Found TELEGRAM_TOKEN in environment var"))?;
+    let telegram_chat_id_str = std::env::var("TELEGRAM_CHAT_ID")
+        .map_err(|_| anyhow::format_err!("Not Found TELEGRAM_CHAT_ID in environment var"))?;
+    let telegram_chat_id: i64 = telegram_chat_id_str
+        .parse()
+        .map_err(|_| anyhow::format_err!("Invalid TELEGRAM_CHAT_ID"))?;
 
     let app_state_service = Arc::new(AppStateServiceSimple::new());
     let upbit_service = Arc::new(UpbitServiceSimple::new(&access_key, &secret_key));
@@ -50,8 +62,15 @@ async fn main() -> Result<()> {
         )
         .await,
     );
-    let buyer_service = Arc::new(BuyerServiceSimple::new(upbit_service.clone()));
-    let seller_service = Arc::new(SellerServiceSimple::new(upbit_service.clone()));
+    let noti_sender = Arc::new(NotiSenderTelegram::new(telegram_token, telegram_chat_id));
+    let buyer_service = Arc::new(BuyerServiceSimple::new(
+        upbit_service.clone(),
+        noti_sender.clone(),
+    ));
+    let seller_service = Arc::new(SellerServiceSimple::new(
+        upbit_service.clone(),
+        noti_sender.clone(),
+    ));
 
     tracing_subscriber::fmt()
         .with_writer(AppStateWriter::new(app_state_service.clone()))

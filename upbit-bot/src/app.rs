@@ -12,7 +12,7 @@ use rust_decimal::prelude::*;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 lazy_static! {
-    pub static ref VOLUME_FACTOR: Decimal = Decimal::from_f64(5.0).unwrap();
+    pub static ref VOLUME_FACTOR: Decimal = Decimal::from_f64(2.0).unwrap();
     pub static ref MIN_PRICE: Decimal = Decimal::from(1_000);
     pub static ref BUY_PRICE: Decimal = Decimal::from(100_000);
     pub static ref FEE_FACTOR: Decimal = Decimal::from_f64(0.0002).unwrap();

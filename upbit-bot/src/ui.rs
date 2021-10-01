@@ -248,10 +248,6 @@ pub async fn handle_input(
             event::Event::Key(key_event) => match key_event.code {
                 event::KeyCode::Char('q') => {
                     rollback_ui(terminal)?;
-                    ui_state
-                        .req_remain_info
-                        .iter()
-                        .for_each(|x| println!("{}, {}, {}", x.0, x.1 .0, x.1 .1));
                     ui_state.is_shutdown = true;
                     Ok(ui_state)
                 }

@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
                 ui_state.message_vscroll = 0;
                 ui_state.message_hscroll = 0;
                 _app_state_service.set_log_messages(vec![]).await;
-                upbit_service.clear_remain_req().await;
+                //upbit_service.clear_remain_req().await;
                 terminal.clear()?;
             }
             //Some(ui::Event::UiEvent(crossterm::event::Event::Key(key_event)))

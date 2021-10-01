@@ -1,11 +1,11 @@
-use crate::{app::*, upbit};
+use crate::{app, upbit, *};
 
+use async_trait::async_trait;
 use itertools::*;
+use rust_decimal::prelude::*;
 use std::iter::FromIterator;
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
-use async_trait::async_trait;
-use rust_decimal::prelude::*;
 
 pub struct UpbitServiceDummyAccount<U: upbit::UpbitService, A: AppStateService> {
     upbit_service: Arc<U>,
@@ -44,7 +44,7 @@ fn add_account(
     price: Decimal,
     volume: Decimal,
     accounts: Arc<HashMap<String, upbit::Account>>,
-) -> HashMap<String, upbit::Account> {
+) -> Result<HashMap<String, upbit::Account>, upbit::Error> {
     apply_account(market_id, 1, price, volume, accounts)
 }
 
@@ -53,9 +53,8 @@ fn sub_account(
     price: Decimal,
     volume: Decimal,
     accounts: Arc<HashMap<String, upbit::Account>>,
-) -> HashMap<String, upbit::Account> {
-    let acc = apply_account(market_id, -1, price, volume, accounts);
-	HashMap::from_iter(acc.into_iter().filter(|(s, x)| s == "KRW" || x.balance != Decimal::ZERO))
+) -> Result<HashMap<String, upbit::Account>, upbit::Error> {
+    apply_account(market_id, -1, price, volume, accounts)
 }
 
 fn apply_account(
@@ -64,7 +63,7 @@ fn apply_account(
     price: Decimal,
     volume: Decimal,
     accounts: Arc<HashMap<String, upbit::Account>>,
-) -> HashMap<String, upbit::Account> {
+) -> Result<HashMap<String, upbit::Account>, upbit::Error> {
     let mut new_accounts = accounts.as_ref().clone();
     let mut default_account = upbit::Account::default();
     default_account.currency = market_id.replace("KRW-", "");
@@ -74,14 +73,25 @@ fn apply_account(
         .cloned()
         .unwrap_or(default_account);
     let amount = account.avg_buy_price * account.balance + Decimal::from(sign) * price * volume;
+    if account.balance + Decimal::from(sign) * volume < Decimal::ZERO {
+        return Err(upbit::Error::InternalError(format!(
+            "Invalid Balance ({}, {}, {})",
+            account.currency,
+            account.avg_buy_price * account.balance,
+            Decimal::from(sign) * price * volume
+        )));
+    }
     account.balance = account.balance + Decimal::from(sign) * volume;
     account.avg_buy_price = if account.balance == Decimal::ZERO {
-		Decimal::ZERO
-	} else {
-		amount / account.balance
-	} ;
+        Decimal::ZERO
+    } else {
+        amount / account.balance
+    };
     new_accounts.insert(account.currency.clone(), account);
-    new_accounts
+    Ok(HashMap::from_iter(
+        new_accounts.into_iter()
+            .filter(|(s, x)| s == "KRW" || x.balance != Decimal::ZERO),
+    ))
 }
 
 #[async_trait]
@@ -163,12 +173,6 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                 "Account State Error".to_owned(),
             ));
         }
-        String::new();
-        if account.unwrap().balance < (*BUY_PRICE * (*FEE_FACTOR + Decimal::ONE)) {
-            return Err(upbit::Error::InternalError(
-                "Insufficient balance".to_owned(),
-            ));
-        }
         match order_req.order_type {
             upbit::OrderType::Limit => {
                 if order_req.price == Decimal::ZERO {
@@ -180,22 +184,25 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                         "Volume must not be 0".to_owned(),
                     ))
                 } else {
+                    let sign = order_req.side.get_sign();
                     self.app_state_service
                         .update_accounts(|v: Arc<HashMap<String, upbit::Account>>| {
-                            let acc = add_account(
+                            let acc = apply_account(
                                 order_req.market.clone(),
+                                sign,
                                 order_req.price,
                                 order_req.volume,
                                 v,
-                            );
-                            sub_account(
+                            )?;
+                            apply_account(
                                 "KRW-KRW".to_owned(),
+                                -sign,
                                 Decimal::ZERO,
                                 *BUY_PRICE * (*FEE_FACTOR + Decimal::ONE),
                                 Arc::new(acc),
                             )
                         })
-                        .await;
+                        .await?;
                     ret.price = order_req.price;
                     ret.avg_price = order_req.price;
                     ret.executed_volume = order_req.volume;
@@ -222,7 +229,7 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                         let volume = order_req.price / price;
                         self.app_state_service
                             .update_accounts(|v: Arc<HashMap<String, upbit::Account>>| {
-                                let acc = add_account(order_req.market.clone(), price, volume, v);
+                                let acc = add_account(order_req.market.clone(), price, volume, v)?;
                                 sub_account(
                                     "KRW-KRW".to_owned(),
                                     Decimal::ZERO,
@@ -230,7 +237,7 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                                     Arc::new(acc),
                                 )
                             })
-                            .await;
+                            .await?;
                         ret.price = price;
                         ret.avg_price = price;
                         ret.executed_volume = order_req.volume;
@@ -263,7 +270,7 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                         let volume = order_req.volume;
                         self.app_state_service
                             .update_accounts(|v: Arc<HashMap<String, upbit::Account>>| {
-                                let acc = sub_account(order_req.market.clone(), price, volume, v);
+                                let acc = sub_account(order_req.market.clone(), price, volume, v)?;
                                 add_account(
                                     "KRW-KRW".to_owned(),
                                     Decimal::ZERO,
@@ -271,7 +278,7 @@ impl<U: upbit::UpbitService, A: AppStateService> upbit::UpbitService
                                     Arc::new(acc),
                                 )
                             })
-                            .await;
+                            .await?;
                         ret.price = price;
                         ret.avg_price = price;
                         ret.executed_volume = order_req.volume;

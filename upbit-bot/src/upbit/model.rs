@@ -264,6 +264,15 @@ pub enum OrderSide {
     Ask, // 매도
 }
 
+impl OrderSide {
+    pub fn get_sign(&self) -> i8 {
+        match self {
+            OrderSide::Bid => 1,
+            OrderSide::Ask => -1,
+        }
+    }
+}
+
 impl Default for OrderSide {
     fn default() -> Self {
         OrderSide::Ask

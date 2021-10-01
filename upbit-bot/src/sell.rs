@@ -53,8 +53,8 @@ impl<U: upbit::UpbitService> SellerService for SellerServiceSimple<U> {
 
                             if is_dead_cross {
                                 info!(
-                                    "sell {} -> moving_avg5: {}, moving_avg20: {}",
-                                    market_id, moving_avg5, moving_avg20
+                                    "sell {} ({}) -> moving_avg5: {}, moving_avg20: {}",
+                                    market_id, ticker.trade_price, moving_avg5, moving_avg20
                                 );
                                 let ret = retry(1, Duration::from_millis(10), || async {
                                     let mut req = upbit::OrderRequest::default();

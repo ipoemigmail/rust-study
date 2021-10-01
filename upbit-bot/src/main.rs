@@ -22,6 +22,7 @@ use itertools::*;
 use sell::*;
 use simulation::*;
 use tracing::info;
+
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::error;
 use upbit::*;
+use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -184,9 +186,9 @@ async fn candle_updater<S: AppStateService + 'static, U: UpbitService + 'static>
                             .update_candles(move |v: Arc<HashMap<String, Arc<Vec<Candle>>>>| {
                                 let mut new_candles = v.as_ref().clone();
                                 new_candles.insert(market_id.to_owned(), Arc::new(xs));
-                                new_candles
+                                Ok(new_candles) as Result<_, app::Error>
                             })
-                            .await
+                            .await;
                     }
                     Err(e) => {
                         error!("{} ({}:{})", e, file!(), line!())
@@ -262,7 +264,7 @@ async fn ticker_updater<S: AppStateService + 'static, U: UpbitService + 'static>
                                 .update_last_tick(|v: Arc<HashMap<String, TickerWs>>| {
                                     let mut new_last_tick = v.as_ref().clone();
                                     new_last_tick.insert(ticker.code.clone(), ticker.clone());
-                                    new_last_tick
+                                    Ok(new_last_tick) as Result<_, app::Error>
                                 })
                                 .await;
 

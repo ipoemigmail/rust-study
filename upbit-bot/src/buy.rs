@@ -37,6 +37,15 @@ fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64
 #[async_trait]
 impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
     async fn process(&self, app_state: &AppState) {
+        if app_state
+            .accounts
+            .get("KRW")
+            .filter(|acc| acc.balance >= (*BUY_PRICE * (*FEE_FACTOR + Decimal::ONE)))
+            .is_none()
+        {
+            return;
+        }
+
         for market_id in app_state.market_ids.iter() {
             match app_state.candles.get(market_id) {
                 Some(candles) => match app_state.last_tick.get(market_id) {
@@ -57,23 +66,28 @@ impl<U: upbit::UpbitService> BuyerService for BuyerServiceSimple<U> {
                             let is_golden_cross =
                                 prev_moving_avg5 <= prev_moving_avg20 && moving_avg5 > moving_avg20;
 
-                            let volume_sum: Decimal = candles
-                                .iter()
-                                .take(20)
-                                .map(|x| Decimal::from(x.candle_acc_trade_volume))
-                                .sum();
-                            let avg_volume = volume_sum / Decimal::from(20);
-                            let is_abnormal_volume =
-                                Decimal::from(ticker.trade_volume) > avg_volume * *VOLUME_FACTOR;
+                            //let volume_sum: Decimal = candles
+                            //    .iter()
+                            //    .take(20)
+                            //    .map(|x| Decimal::from(x.candle_acc_trade_volume))
+                            //    .sum();
+                            //let avg_volume = volume_sum / Decimal::from(20);
+                            //let is_abnormal_volume =
+                            //    Decimal::from(ticker.trade_volume) > avg_volume * *VOLUME_FACTOR;
 
                             if is_golden_cross
-                                && is_abnormal_volume
-                                && ticker.trade_price >= *MIN_PRICE {
-                            //if is_abnormal_volume {
+                                //&& is_abnormal_volume
+                                && ticker.trade_price >= *MIN_PRICE
+                            {
+                                //if is_abnormal_volume {
                                 info!(
-									"buy {} -> moving_avg5: {}, moving_avg20: {}, avg volumne: {}, cur volume: {}",
-									market_id, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
-								);
+                                    "buy {} ({}) -> moving_avg5: {}, moving_avg20: {}",
+                                    //market_id, ticker.trade_price, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
+                                    market_id,
+                                    ticker.trade_price,
+                                    moving_avg5,
+                                    moving_avg20
+                                );
                                 let ret = retry(1, Duration::from_millis(10), || async {
                                     let mut req = upbit::OrderRequest::default();
                                     req.market = market_id.clone();

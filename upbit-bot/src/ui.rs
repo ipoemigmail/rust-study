@@ -185,7 +185,7 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
         f.render_widget(account_paragraph, left_layout[0]);
 
         let state_block = widgets::Block::default()
-            .title("──< State >──")
+            .title("──< State (Count) >──")
             .borders(widgets::Borders::ALL);
         let state_paragraph = widgets::Paragraph::new(ui_state.state_info.join("\n"))
             .block(state_block)

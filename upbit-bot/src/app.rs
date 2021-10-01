@@ -2,14 +2,14 @@ use crate::upbit;
 
 use async_lock::RwLock;
 use async_trait::async_trait;
+use chrono::prelude::*;
+use chrono::DateTime;
 use format_num::format_num;
 use futures::{SinkExt, StreamExt};
-
 use itertools::*;
 use lazy_static::lazy_static;
 use rust_decimal::prelude::*;
-
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 lazy_static! {
     pub static ref VOLUME_FACTOR: Decimal = Decimal::from_f64(5.0).unwrap();
@@ -23,6 +23,12 @@ pub trait ToInfo {
     fn candle_info(&self) -> Vec<String>;
     fn state_info(&self) -> Vec<String>;
     fn message_info(&self) -> Vec<String>;
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("{0}")]
+    InternalError(String),
 }
 
 #[derive(Debug, Clone)]
@@ -50,48 +56,94 @@ impl AppState {
 
 impl ToInfo for AppState {
     fn account_info(&self) -> Vec<String> {
-        self.accounts
-            .iter()
-            .map(|(_, a)| {
-                let v = self
-                    .last_tick
-                    .get(format!("{}-{}", a.unit_currency, a.currency).as_str());
-                let price = if a.currency == "KRW" {
-                    1.into()
-                } else {
-                    v.map(|x| x.trade_price).unwrap_or(Decimal::ZERO)
-                };
-                let values = (|| -> Option<_> {
-                    let fmt_cur_amount = format_num!(",.0f", (a.balance * price).to_f64()?);
-                    let fmt_buy_amount =
-                        format_num!(",.0f", (a.balance * a.avg_buy_price).to_f64()?);
-                    let fmt_balance = format_num!(",.4f", a.balance.to_f64()?);
-                    let fmt_avg_buy_price = format_num!(",.2f", a.avg_buy_price.to_f64()?);
-                    let fmt_price = format_num!(",.2f", price.to_f64()?);
-                    Some((
+        #[derive(Debug, Clone, Default)]
+        struct AccountInfo {
+            currency: String,
+            cur_amount: Decimal,
+            buy_amount: Decimal,
+            balance: Decimal,
+            cur_price: Decimal,
+            avg_buy_price: Decimal,
+        }
+
+        impl ToString for AccountInfo {
+            fn to_string(&self) -> String {
+                (|| -> Option<String> {
+                    let fmt_cur_amount = format_num!(",.0f", self.cur_amount.to_f64()?);
+                    let fmt_buy_amount = format_num!(",.0f", self.buy_amount.to_f64()?);
+                    let fmt_balance = format_num!(",.4f", self.balance.to_f64()?);
+                    let fmt_cur_price = format_num!(",.2f", self.cur_price.to_f64()?);
+                    let fmt_avg_buy_price = format_num!(",.2f", self.avg_buy_price.to_f64()?);
+                    Some(format!(
+                        "{} - Amount: {}({}), Price: {}({}), Qty: {}",
+                        self.currency,
                         fmt_cur_amount,
                         fmt_buy_amount,
                         fmt_balance,
+                        fmt_cur_price,
                         fmt_avg_buy_price,
-                        fmt_price,
                     ))
-                })();
-                match values {
-                    Some((cur_amount, buy_amount, balance, avg_buy_price, price)) => format!(
-                        "{} - Amount:{}({}), Price:{}({}), Qty: {}, Unit: {}",
-                        a.currency,
-                        cur_amount,
-                        buy_amount,
-                        price,
-                        avg_buy_price,
-                        balance,
-                        a.unit_currency
-                    ),
-                    None => "".to_owned(),
-                }
-            })
-            .sorted()
-            .collect_vec()
+                })()
+                .unwrap_or("".to_owned())
+            }
+        }
+
+        let to_info = |a: &upbit::Account| -> Option<AccountInfo> {
+            let tick = self
+                .last_tick
+                .get(format!("{}-{}", a.unit_currency, a.currency).as_str());
+            let price = if a.currency == "KRW" {
+                1.into()
+            } else {
+                tick.map(|x| x.trade_price).unwrap_or(Decimal::ZERO)
+            };
+            let mut value = AccountInfo::default();
+            value.currency = a.currency.clone();
+            value.cur_amount = a.balance * price;
+            value.buy_amount = a.balance * a.avg_buy_price;
+            value.balance = a.balance;
+            value.cur_price = price;
+            value.avg_buy_price = a.avg_buy_price;
+            Some(value)
+        };
+
+        let krw_account = self.accounts.get("KRW").cloned();
+        let krw_except_accounts = self
+            .accounts
+            .as_ref()
+            .clone()
+            .into_iter()
+            .filter(|x| x.0 != "KRW")
+            .collect_vec();
+
+        let mut ret = vec![krw_account
+            .map(|x| to_info(&x))
+            .flatten()
+            .map(|x| x.to_string())
+            .unwrap_or("".to_owned())];
+        if !krw_except_accounts.is_empty() {
+            ret.push("-----------".to_owned());
+            ret.extend(
+                krw_except_accounts
+                    .iter()
+                    .map(|(_, a)| to_info(a).map(|x| x.to_string()).unwrap_or("".to_owned()))
+                    .sorted()
+                    .collect_vec(),
+            );
+        }
+        ret.push("-----------".to_owned());
+        let total_amount = self
+            .accounts
+            .iter()
+            .map(|x| to_info(x.1).map(|y| y.cur_amount).unwrap_or(Decimal::ZERO))
+            .sum::<Decimal>()
+            .to_f64()
+            .unwrap_or(0.0);
+        ret.push(format!(
+            "Total - Amount: {}",
+            format_num!(",.0f", total_amount)
+        ));
+        ret
     }
 
     fn candle_info(&self) -> Vec<String> {
@@ -123,10 +175,27 @@ impl ToInfo for AppState {
     }
 
     fn state_info(&self) -> Vec<String> {
+        let last_candle_time = self
+            .candles
+            .iter()
+            .flat_map(|x| x.1.first().map(|x| x.candle_date_time_kst.clone()))
+            .max()
+            .unwrap_or("N/A".to_owned());
+        let last_tick_time = self
+            .last_tick
+            .iter()
+            .map(|x| x.1.timestamp)
+            .max()
+            .map(|x| {
+                let d = std::time::UNIX_EPOCH + Duration::from_millis(x as u64);
+                let dt = DateTime::<Local>::from(d);
+                dt.format("%Y-%m-%dT%H:%M:%S.%3f").to_string()
+            })
+            .unwrap_or("N/A".to_owned());
         vec![
-            format!("market count: {}", self.market_ids.len()),
-            format!("candle count: {}", self.candles.len()),
-            format!("last_tick count: {}", self.last_tick.len()),
+            format!("market: {}", self.market_ids.len()),
+            format!("candle: {} ({})", self.candles.len(), last_candle_time),
+            format!("last_tick: {} ({})", self.last_tick.len(), last_tick_time),
         ]
     }
 
@@ -139,33 +208,58 @@ impl ToInfo for AppState {
     }
 }
 
-pub trait SendArcF<A>: (FnOnce(Arc<A>) -> A) + Send {}
-impl<A, T: (FnOnce(Arc<A>) -> A) + Send> SendArcF<A> for T {}
+pub trait SendArcF<A, E: std::error::Error>: (FnOnce(Arc<A>) -> Result<A, E>) + Send {}
+impl<A, E: std::error::Error, T: (FnOnce(Arc<A>) -> Result<A, E>) + Send> SendArcF<A, E> for T {}
 
-pub trait SendF<A>: (FnOnce(A) -> A) + Send {}
-impl<A, T: (FnOnce(A) -> A) + Send> SendF<A> for T {}
+pub trait SendF<A, E: std::error::Error>: (FnOnce(A) -> Result<A, E>) + Send {}
+impl<A, E: std::error::Error, T: (FnOnce(A) -> Result<A, E>) + Send> SendF<A, E> for T {}
 
 #[async_trait]
 pub trait AppStateService: Send + Sync {
     async fn state(&self) -> AppState;
     async fn is_shutdown(&self) -> bool;
     async fn set_shutdown(&self, is_shutdown: bool);
-    async fn update_shutdown<F: SendF<bool>>(&self, f: F);
+    async fn update_shutdown<E: std::error::Error, F: SendF<bool, E>>(&self, f: F)
+        -> Result<(), E>;
     async fn market_ids(&self) -> Arc<Vec<String>>;
     async fn set_market_ids(&self, market_ids: Vec<String>);
-    async fn update_market_ids<F: SendArcF<Vec<String>>>(&self, f: F);
+    async fn update_market_ids<E: std::error::Error, F: SendArcF<Vec<String>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
     async fn candles(&self) -> Arc<HashMap<String, Arc<Vec<upbit::Candle>>>>;
     async fn set_candles(&self, candles: HashMap<String, Arc<Vec<upbit::Candle>>>);
-    async fn update_candles<F: SendArcF<HashMap<String, Arc<Vec<upbit::Candle>>>>>(&self, f: F);
+    async fn update_candles<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, Arc<Vec<upbit::Candle>>>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
     async fn last_tick(&self) -> Arc<HashMap<String, upbit::TickerWs>>;
     async fn set_last_tick(&self, last_tick: HashMap<String, upbit::TickerWs>);
-    async fn update_last_tick<F: SendArcF<HashMap<String, upbit::TickerWs>>>(&self, f: F);
+    async fn update_last_tick<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, upbit::TickerWs>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
     async fn accounts(&self) -> Arc<HashMap<String, upbit::Account>>;
     async fn set_accounts(&self, accounts: HashMap<String, upbit::Account>);
-    async fn update_accounts<F: SendArcF<HashMap<String, upbit::Account>>>(&self, f: F);
+    async fn update_accounts<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, upbit::Account>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
     async fn log_messages(&self) -> Arc<Vec<String>>;
     async fn set_log_messages(&self, log_messages: Vec<String>);
-    async fn update_log_messages<F: SendArcF<Vec<String>>>(&self, f: F);
+    async fn update_log_messages<E: std::error::Error, F: SendArcF<Vec<String>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
 }
 
 #[derive(Clone)]
@@ -195,9 +289,12 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.is_shutdown = is_shutdown;
     }
 
-    async fn update_shutdown<F: SendF<bool>>(&self, f: F) {
+    async fn update_shutdown<E: std::error::Error, F: SendF<bool, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.is_shutdown = f(guard.is_shutdown)
+        Ok(guard.is_shutdown = f(guard.is_shutdown)?)
     }
 
     async fn market_ids(&self) -> Arc<Vec<String>> {
@@ -208,9 +305,12 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.market_ids = Arc::new(market_ids);
     }
 
-    async fn update_market_ids<F: SendArcF<Vec<String>>>(&self, f: F) {
+    async fn update_market_ids<E: std::error::Error, F: SendArcF<Vec<String>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.market_ids = Arc::new(f(guard.market_ids.clone()))
+        Ok(guard.market_ids = Arc::new(f(guard.market_ids.clone())?))
     }
 
     async fn candles(&self) -> Arc<HashMap<String, Arc<Vec<upbit::Candle>>>> {
@@ -221,9 +321,15 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.candles = Arc::new(candles);
     }
 
-    async fn update_candles<F: SendArcF<HashMap<String, Arc<Vec<upbit::Candle>>>>>(&self, f: F) {
+    async fn update_candles<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, Arc<Vec<upbit::Candle>>>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.candles = Arc::new(f(guard.candles.clone()))
+        Ok(guard.candles = Arc::new(f(guard.candles.clone())?))
     }
 
     async fn last_tick(&self) -> Arc<HashMap<String, upbit::TickerWs>> {
@@ -234,9 +340,15 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.last_tick = Arc::new(last_tick);
     }
 
-    async fn update_last_tick<F: SendArcF<HashMap<String, upbit::TickerWs>>>(&self, f: F) {
+    async fn update_last_tick<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, upbit::TickerWs>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.last_tick = Arc::new(f(guard.last_tick.clone()))
+        Ok(guard.last_tick = Arc::new(f(guard.last_tick.clone())?))
     }
 
     async fn accounts(&self) -> Arc<HashMap<String, upbit::Account>> {
@@ -247,9 +359,15 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.accounts = Arc::new(accounts);
     }
 
-    async fn update_accounts<F: SendArcF<HashMap<String, upbit::Account>>>(&self, f: F) {
+    async fn update_accounts<
+        E: std::error::Error,
+        F: SendArcF<HashMap<String, upbit::Account>, E>,
+    >(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.accounts = Arc::new(f(guard.accounts.clone()))
+        Ok(guard.accounts = Arc::new(f(guard.accounts.clone())?))
     }
 
     async fn log_messages(&self) -> Arc<Vec<String>> {
@@ -260,9 +378,12 @@ impl AppStateService for AppStateServiceSimple {
         self.app_state.write().await.log_messages = Arc::new(log_messages);
     }
 
-    async fn update_log_messages<F: SendArcF<Vec<String>>>(&self, f: F) {
+    async fn update_log_messages<E: std::error::Error, F: SendArcF<Vec<String>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
-        guard.log_messages = Arc::new(f(guard.log_messages.clone()))
+        Ok(guard.log_messages = Arc::new(f(guard.log_messages.clone())?))
     }
 }
 
@@ -286,7 +407,7 @@ impl<S: AppStateService + 'static> AppStateWriter<S> {
             loop {
                 match rx.next().await {
                     Some(AppStateWriterMsg::Write(msg)) => {
-                        _app_state_service
+                        let ret = _app_state_service
                             .clone()
                             .update_log_messages(move |v: Arc<Vec<String>>| {
                                 let mut new = v.as_ref().clone();
@@ -297,9 +418,13 @@ impl<S: AppStateService + 'static> AppStateWriter<S> {
                                         .trim()
                                         .to_owned(),
                                 );
-                                new
+                                Ok(new) as Result<_, Error>
                             })
                             .await;
+                        match ret {
+                            Ok(_) => (),
+                            Err(err) => println!("{}", err),
+                        }
                     }
                     Some(AppStateWriterMsg::Flush) => {
                         _app_state_service.clone().set_log_messages(vec![]).await;

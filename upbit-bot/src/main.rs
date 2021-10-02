@@ -9,6 +9,7 @@ mod upbit;
 mod util;
 
 use crate::app::*;
+use crate::noti::NotiSender;
 use crate::noti::NotiSenderTelegram;
 
 use anyhow::Result;
@@ -17,10 +18,12 @@ use buy::*;
 use chrono::prelude::*;
 use chrono::DurationRound;
 use dotenv::dotenv;
+use format_num::format_num;
 use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::StreamExt;
 use itertools::*;
+use rust_decimal::prelude::*;
 use sell::*;
 use simulation::*;
 use tracing::info;
@@ -97,13 +100,23 @@ async fn run() -> Result<()> {
         ticker_updater(app_state_service.clone(), upbit_service.clone()).await;
 
     let _app_state_service = app_state_service.clone();
-    let buyer_handle = tokio::spawn(async move {
+    let process_handle = tokio::spawn(async move {
         loop {
             match ticker_stream.next().await {
                 Some(_) => {
                     let app_state = _app_state_service.clone().state().await;
                     seller_service.process(&app_state).await;
-                    buyer_service.process(&app_state).await;
+                    let bs = buyer_service.process(&app_state).await;
+                    if !bs.is_empty() {
+                        _app_state_service.update_last_buy_time(|v: Arc<HashMap<String, i64>>| {
+                            let now = chrono::Local::now();
+                            let mut new_last_buy_time = v.as_ref().clone();
+                            for market_id in bs {
+                                new_last_buy_time.insert(market_id, (now.timestamp_millis() / 1000) * 1000);
+                            }
+                            Ok(new_last_buy_time) as Result<_, app::Error>
+                        }).await.unwrap_or(())
+                    }
                 }
                 None => (),
             }
@@ -153,7 +166,7 @@ async fn run() -> Result<()> {
     market_list_updater.abort();
     account_updater.abort();
     ticker_updater.abort();
-    buyer_handle.abort();
+    process_handle.abort();
     println!("is_shutdown: {}", is_shutdown);
     Ok(())
 }

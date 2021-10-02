@@ -29,8 +29,8 @@ impl NotiSenderTelegram {
 #[async_trait]
 impl NotiSender for NotiSenderTelegram {
     async fn send_msg(&self, msg: &str) -> Result<(), Error> {
-        let bot = Bot::new(self.token.clone());
-        bot.send_message(self.chat_id, msg).send().await?;
+        //let bot = Bot::new(self.token.clone());
+        //bot.send_message(self.chat_id, msg).send().await?;
         Ok(())
     }
 }

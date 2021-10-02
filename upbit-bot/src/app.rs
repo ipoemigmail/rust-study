@@ -39,6 +39,7 @@ pub struct AppState {
     pub last_tick: Arc<HashMap<String, upbit::TickerWs>>,
     pub accounts: Arc<HashMap<String, upbit::Account>>,
     pub log_messages: Arc<Vec<String>>,
+    pub last_buy_time: Arc<HashMap<String, i64>>,
 }
 
 impl AppState {
@@ -50,6 +51,7 @@ impl AppState {
             last_tick: Arc::new(HashMap::new()),
             accounts: Arc::new(HashMap::new()),
             log_messages: Arc::new(vec![]),
+            last_buy_time: Arc::new(HashMap::new()),
         }
     }
 }
@@ -79,9 +81,9 @@ impl ToInfo for AppState {
                         self.currency,
                         fmt_cur_amount,
                         fmt_buy_amount,
-                        fmt_balance,
                         fmt_cur_price,
                         fmt_avg_buy_price,
+                        fmt_balance,
                     ))
                 })()
                 .unwrap_or("".to_owned())
@@ -202,7 +204,9 @@ impl ToInfo for AppState {
     fn message_info(&self) -> Vec<String> {
         self.log_messages
             .iter()
+            .rev()
             .enumerate()
+            .rev()
             .map(|(i, x)| format!("[{}] {}", i, x))
             .collect_vec()
     }
@@ -257,6 +261,12 @@ pub trait AppStateService: Send + Sync {
     async fn log_messages(&self) -> Arc<Vec<String>>;
     async fn set_log_messages(&self, log_messages: Vec<String>);
     async fn update_log_messages<E: std::error::Error, F: SendArcF<Vec<String>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E>;
+    async fn last_buy_time(&self) -> Arc<HashMap<String, i64>>;
+    async fn set_last_buy_time(&self, last_buy_time: HashMap<String, i64>);
+    async fn update_last_buy_time<E: std::error::Error, F: SendArcF<HashMap<String, i64>, E>>(
         &self,
         f: F,
     ) -> Result<(), E>;
@@ -384,6 +394,22 @@ impl AppStateService for AppStateServiceSimple {
     ) -> Result<(), E> {
         let mut guard = self.app_state.write().await;
         Ok(guard.log_messages = Arc::new(f(guard.log_messages.clone())?))
+    }
+
+    async fn last_buy_time(&self) -> Arc<HashMap<String, i64>> {
+        self.app_state.read().await.last_buy_time.clone()
+    }
+
+    async fn set_last_buy_time(&self, last_buy_time: HashMap<String, i64>) {
+        self.app_state.write().await.last_buy_time = Arc::new(last_buy_time);
+    }
+
+    async fn update_last_buy_time<E: std::error::Error, F: SendArcF<HashMap<String, i64>, E>>(
+        &self,
+        f: F,
+    ) -> Result<(), E> {
+        let mut guard = self.app_state.write().await;
+        Ok(guard.last_buy_time = Arc::new(f(guard.last_buy_time.clone())?))
     }
 }
 

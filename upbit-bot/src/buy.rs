@@ -1,9 +1,9 @@
-use crate::app::*;
-use crate::noti;
 use crate::upbit;
 use crate::util::retry;
+use crate::{app::*, noti};
 
 use async_trait::async_trait;
+use format_num::format_num;
 use itertools::Itertools;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use tracing::{error, info};
 
 #[async_trait]
 pub trait BuyerService: Send + Sync {
-    async fn process(&self, app_state: &AppState);
+    async fn process(&self, app_state: &AppState) -> Vec<String>;
 }
 
 pub struct BuyerServiceSimple<U: upbit::UpbitService, N: noti::NotiSender> {
@@ -41,17 +41,24 @@ fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64
 
 #[async_trait]
 impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerService for BuyerServiceSimple<U, N> {
-    async fn process(&self, app_state: &AppState) {
+    async fn process(&self, app_state: &AppState) -> Vec<String> {
+        let mut bought_market_ids = vec![];
         if app_state
             .accounts
             .get("KRW")
             .filter(|acc| acc.balance >= (*BUY_PRICE * (*FEE_FACTOR + Decimal::ONE)))
             .is_none()
         {
-            return;
+            return bought_market_ids;
         }
 
+        let now_millis = chrono::Local::now().timestamp_millis();
+
         for market_id in app_state.market_ids.iter() {
+            let last_buy_time = app_state.last_buy_time.get(market_id).cloned();
+            if last_buy_time.filter(|time| (time + Duration::from_secs(60).as_millis() as i64) > now_millis).is_some() {
+                continue;
+            }
             match app_state.candles.get(market_id) {
                 Some(candles) => match app_state.last_tick.get(market_id) {
                     Some(ticker) => {
@@ -84,7 +91,6 @@ impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerService for BuyerServiceS
                                 //&& is_abnormal_volume
                                 && ticker.trade_price >= *MIN_PRICE
                             {
-                                //if is_abnormal_volume {
                                 let msg = format!(
                                     "buy {} ({}) -> moving_avg5: {}, moving_avg20: {}",
                                     //market_id, ticker.trade_price, moving_avg5, moving_avg20, avg_volume, ticker.trade_volume
@@ -106,8 +112,34 @@ impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerService for BuyerServiceS
 
                                 match ret {
                                     Ok(_) => {
-                                        let now = chrono::Local::now();
-                                        self.noti_sender.send_msg(&format!("[{}] {}", now.to_rfc3339(), msg)).await.unwrap_or(())
+                                        bought_market_ids.push(market_id.clone());
+                                        match self.upbit_service.accounts().await {
+                                            Ok(accounts) => {
+                                                let now_str = chrono::Local::now()
+                                                    .format("%Y-%m-%d %H:%M:%S");
+                                                let total = accounts
+                                                    .iter()
+                                                    .map(|x| if x.currency == "KRW" { Decimal::ONE } else { x.avg_buy_price } * x.balance)
+                                                    .sum::<Decimal>();
+                                                let total_str =
+                                                    format_num!(",.0f", total.to_f64().unwrap());
+                                                let price_str = format_num!(
+                                                    ",.2f",
+                                                    ticker.trade_price.to_f64().unwrap()
+                                                );
+                                                self.noti_sender
+                                                    .send_msg(&format!(
+                                                        "[{}] buy {}({}), total: {}",
+                                                        now_str,
+                                                        market_id.replace("KRW-", ""),
+                                                        price_str,
+                                                        total_str
+                                                    ))
+                                                    .await
+                                                    .unwrap_or(());
+                                            }
+                                            Err(err) => error!("{} ({}:{})", err, file!(), line!()),
+                                        }
                                     }
                                     Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                                 }
@@ -119,5 +151,6 @@ impl<U: upbit::UpbitService, N: noti::NotiSender> BuyerService for BuyerServiceS
                 None => (),
             }
         }
+        bought_market_ids
     }
 }

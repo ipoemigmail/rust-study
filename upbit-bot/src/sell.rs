@@ -3,6 +3,7 @@ use crate::noti;
 use crate::upbit;
 use crate::util::retry;
 
+use format_num::format_num;
 use async_trait::async_trait;
 use itertools::Itertools;
 use rust_decimal::prelude::*;
@@ -12,7 +13,7 @@ use tracing::{error, info};
 
 #[async_trait]
 pub trait SellerService: Send + Sync {
-    async fn process(&self, app_state: &AppState);
+    async fn process(&self, app_state: &AppState) -> Vec<String>;
 }
 
 pub struct SellerServiceSimple<U: upbit::UpbitService, N: noti::NotiSender> {
@@ -22,10 +23,7 @@ pub struct SellerServiceSimple<U: upbit::UpbitService, N: noti::NotiSender> {
 
 impl<U: upbit::UpbitService, N: noti::NotiSender> SellerServiceSimple<U, N> {
     pub fn new(upbit_service: Arc<U>, noti_sender: Arc<N>) -> SellerServiceSimple<U, N> {
-        SellerServiceSimple {
-            upbit_service,
-            noti_sender,
-        }
+        SellerServiceSimple { upbit_service, noti_sender }
     }
 }
 
@@ -41,7 +39,8 @@ fn moving_average<'a, I: Iterator<Item = &'a Decimal> + Clone>(prices: I) -> f64
 
 #[async_trait]
 impl<U: upbit::UpbitService, N: noti::NotiSender> SellerService for SellerServiceSimple<U, N> {
-    async fn process(&self, app_state: &AppState) {
+    async fn process(&self, app_state: &AppState) -> Vec<String> {
+        let mut sold_market_ids = vec![];
         for market_id in app_state.market_ids.iter() {
             match app_state.candles.get(market_id) {
                 Some(candles) => match app_state.last_tick.get(market_id) {
@@ -74,8 +73,34 @@ impl<U: upbit::UpbitService, N: noti::NotiSender> SellerService for SellerServic
 
                                 match ret {
                                     Ok(_) => {
-                                        let now = chrono::Local::now();
-                                        self.noti_sender.send_msg(&format!("[{}] {}", now.to_rfc3339(), msg)).await.unwrap_or(())
+                                        sold_market_ids.push(market_id.clone());
+                                        match self.upbit_service.accounts().await {
+                                            Ok(accounts) => {
+                                                let now_str = chrono::Local::now()
+                                                    .format("%Y-%m-%d %H:%M:%S");
+                                                let total = accounts
+                                                    .iter()
+                                                    .map(|x| if x.currency == "KRW" { Decimal::ONE } else { x.avg_buy_price } * x.balance)
+                                                    .sum::<Decimal>();
+                                                let total_str =
+                                                    format_num!(",.0f", total.to_f64().unwrap());
+                                                let price_str = format_num!(
+                                                    ",.2f",
+                                                    ticker.trade_price.to_f64().unwrap()
+                                                );
+                                                self.noti_sender
+                                                    .send_msg(&format!(
+                                                        "[{}] sell {}({}), total: {}",
+                                                        now_str,
+                                                        market_id.replace("KRW-", ""),
+                                                        price_str,
+                                                        total_str
+                                                    ))
+                                                    .await
+                                                    .unwrap_or(());
+                                            }
+                                            Err(err) => error!("{} ({}:{})", err, file!(), line!()),
+                                        }
                                     }
                                     Err(err) => error!("{} ({}:{})", err, file!(), line!()),
                                 }
@@ -87,5 +112,6 @@ impl<U: upbit::UpbitService, N: noti::NotiSender> SellerService for SellerServic
                 None => (),
             }
         }
+        sold_market_ids
     }
 }

@@ -108,14 +108,18 @@ async fn run() -> Result<()> {
                     seller_service.process(&app_state).await;
                     let bs = buyer_service.process(&app_state).await;
                     if !bs.is_empty() {
-                        _app_state_service.update_last_buy_time(|v: Arc<HashMap<String, i64>>| {
-                            let now = chrono::Local::now();
-                            let mut new_last_buy_time = v.as_ref().clone();
-                            for market_id in bs {
-                                new_last_buy_time.insert(market_id, (now.timestamp_millis() / 1000) * 1000);
-                            }
-                            Ok(new_last_buy_time) as Result<_, app::Error>
-                        }).await.unwrap_or(())
+                        _app_state_service
+                            .update_last_buy_time(|v: Arc<HashMap<String, i64>>| {
+                                let now = chrono::Local::now();
+                                let mut new_last_buy_time = v.as_ref().clone();
+                                for market_id in bs {
+                                    new_last_buy_time
+                                        .insert(market_id, (now.timestamp_millis() / 1000) * 1000);
+                                }
+                                Ok(new_last_buy_time) as Result<_, app::Error>
+                            })
+                            .await
+                            .unwrap_or(())
                     }
                 }
                 None => (),

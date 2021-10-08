@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use teloxide::{RequestError, prelude::*};
+use teloxide::{prelude::*, RequestError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

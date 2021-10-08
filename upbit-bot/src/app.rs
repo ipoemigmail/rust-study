@@ -15,7 +15,7 @@ lazy_static! {
     pub static ref VOLUME_FACTOR: Decimal = Decimal::from_f64(2.0).unwrap();
     pub static ref MIN_PRICE: Decimal = Decimal::from(1_000);
     pub static ref BUY_PRICE: Decimal = Decimal::from(100_000);
-    pub static ref FEE_FACTOR: Decimal = Decimal::from_f64(0.0002).unwrap();
+    pub static ref FEE_FACTOR: Decimal = Decimal::from_f64(0.0005).unwrap();
 }
 
 pub trait ToInfo {
@@ -74,8 +74,8 @@ impl ToInfo for AppState {
                     let fmt_cur_amount = format_num!(",.0f", self.cur_amount.to_f64()?);
                     let fmt_buy_amount = format_num!(",.0f", self.buy_amount.to_f64()?);
                     let fmt_balance = format_num!(",.4f", self.balance.to_f64()?);
-                    let fmt_cur_price = format_num!(",.2f", self.cur_price.to_f64()?);
-                    let fmt_avg_buy_price = format_num!(",.2f", self.avg_buy_price.to_f64()?);
+                    let fmt_cur_price = format_num!(",.0f", self.cur_price.to_f64()?);
+                    let fmt_avg_buy_price = format_num!(",.0f", self.avg_buy_price.to_f64()?);
                     Some(format!(
                         "{} - Amount: {}({}), Price: {}({}), Qty: {}",
                         self.currency,

@@ -12,10 +12,7 @@ use std::{
     time::Duration,
 };
 use tracing::error;
-use tui::{
-    backend::{self, CrosstermBackend},
-    layout, widgets, Terminal,
-};
+use tui::{backend::CrosstermBackend, *};
 
 #[derive(Clone, Debug)]
 pub struct UiState {
@@ -205,7 +202,26 @@ pub async fn draw(terminal: &mut MyTerminal, ui_state: UiState) -> Result<UiStat
         let message_block = widgets::Block::default()
             .title("──< Message >──")
             .borders(widgets::Borders::ALL);
-        let message_paragraph = widgets::Paragraph::new(ui_state.message_info.join("\n"))
+        let message_text = ui_state
+            .message_info
+            .iter()
+            .map(|x| {
+                if x.contains("(lose)") {
+                    text::Spans::from(text::Span::styled(
+                        x.clone(),
+                        style::Style::default().fg(style::Color::Red),
+                    ))
+                } else if x.contains("(win)") {
+                    text::Spans::from(text::Span::styled(
+                        x.clone(),
+                        style::Style::default().fg(style::Color::Green),
+                    ))
+                } else {
+                    text::Spans::from(text::Span::styled(x.clone(), style::Style::default()))
+                }
+            })
+            .collect_vec();
+        let message_paragraph = widgets::Paragraph::new(message_text)
             .block(message_block)
             .alignment(layout::Alignment::Left)
             .scroll((
@@ -258,6 +274,21 @@ pub async fn handle_input(
                     ui_state.is_shutdown = true;
                     Ok(ui_state)
                 }
+                event::KeyCode::Char('0') => {
+                    ui_state.message_hscroll = 0;
+                    Ok(ui_state)
+                }
+                event::KeyCode::Char('$') =>
+                {
+                    let message_info_width = ui_state
+                        .message_info
+                        .iter()
+                        .map(|x| x.len())
+                        .max()
+                        .unwrap_or(0);
+                    ui_state.message_hscroll = message_info_width as i32 - ui_state.message_width;
+                    Ok(ui_state)
+                }
                 event::KeyCode::Char('h') => {
                     ui_state.message_hscroll -= 2;
                     ui_state.message_hscroll = ui_state.message_hscroll.max(0);
@@ -284,6 +315,26 @@ pub async fn handle_input(
                 }
                 event::KeyCode::Char('j') => {
                     ui_state.message_vscroll += 1;
+                    ui_state.message_vscroll = ui_state
+                        .message_vscroll
+                        .min(ui_state.message_info.len() as i32 - ui_state.message_height)
+                        .max(0);
+                    Ok(ui_state)
+                }
+                event::KeyCode::Char('b')
+                    if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    ui_state.message_vscroll -= ui_state.message_height;
+                    ui_state.message_vscroll = ui_state
+                        .message_vscroll
+                        .min(ui_state.message_info.len() as i32 - ui_state.message_height)
+                        .max(0);
+                    Ok(ui_state)
+                }
+                event::KeyCode::Char('f')
+                    if (key_event.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    ui_state.message_vscroll += ui_state.message_height;
                     ui_state.message_vscroll = ui_state
                         .message_vscroll
                         .min(ui_state.message_info.len() as i32 - ui_state.message_height)

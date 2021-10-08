@@ -89,7 +89,8 @@ fn apply_account(
     };
     new_accounts.insert(account.currency.clone(), account);
     Ok(HashMap::from_iter(
-        new_accounts.into_iter()
+        new_accounts
+            .into_iter()
             .filter(|(s, x)| s == "KRW" || x.balance != Decimal::ZERO),
     ))
 }

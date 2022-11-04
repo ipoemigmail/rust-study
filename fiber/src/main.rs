@@ -1,23 +1,19 @@
 use std::error::Error;
-use std::future::Future;
-use std::slice::Iter;
+
 use std::time::Duration;
 
 use chrono::Local;
 use futures::stream::{self, StreamExt};
-use tokio::prelude::*;
-use tokio::task::JoinError;
-use tokio::task::JoinHandle;
-use tokio::time;
+use itertools::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let start_time = Local::now();
-    let fibers: Vec<_> = (0..1000000)
+    let fibers = (0..1000000)
         .into_iter()
         .map(|n| tokio::spawn(calc(n)))
-        .collect();
-    let results: Vec<_> = stream::iter(fibers)
+        .collect_vec();
+    let _results: Vec<_> = stream::iter(fibers)
         .then(|f| async move { f.await })
         .collect()
         .await;

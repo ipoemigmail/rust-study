@@ -1,37 +1,39 @@
 [package]
-name = "upbit-bot"
+name = "axum-study"
 version = "0.1.0"
-authors = ["ben.jung <ben.jung@kakaocommerce.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-itertools = '0.10'
+itertools = '*'
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-reqwest = { version = "0.11", features = ["json"] } # http request call
 serde_json = "1.0"
 serde_derive = "1.0"
 serde = { version = "1.0", features = ["rc"] }
-rust_decimal = { version = "1.13", features = ["serde-float"] }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "1"
 dotenv = "0.15"
 chrono = "0.4" # datetime
 lazy_static = "1.4.0" # static heap
-governor = "0.3" # limiter
-crossterm = "0.20" # terminal ui
-tui = { version = "0.16", default-features = false, features = ['crossterm'] } # terminal ui
-hmac = "0.11"
-jwt = "0.14"
-sha2 = "0.9"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 format_num = "0.1"
 async-lock = "2"
-tokio-tungstenite = "*" # web socket
 tracing = "0.1"
-tracing-subscriber = "0.2"
+tracing-subscriber = "0.3"
 tracing-futures = "0.2"
-teloxide = { version = "0.4" }
+sum_type = "0.2"
+axum = { version = "0.5" }
+axum-server = { version = "0.3", features = ["tls-rustls"] }
+tower-cookies = "0.6"
+cookie = "0.16"
+rustls = "0.20"
+clap = { version = "3.1", features = ["derive"] }
+
+
+[[bin]]
+path = "src/main.rs"
+name = "axum_study"
+
